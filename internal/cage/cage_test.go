@@ -87,13 +87,57 @@ func TestPlanWorktree(t *testing.T) {
 	if len(pl.Masks) != 1 {
 		t.Fatalf("masks: %v", pl.Masks)
 	}
-	args := strings.Join(pl.RunArgs(g, "192.168.64.2"), " ")
-	for _, want := range []string{"--network zoo-cages", "--no-dns", "-c 4", "-m 4G", "HTTPS_PROXY=http://192.168.64.2:3128", "-v " + root + ":" + root, "zoo-cage:latest"} {
-		if !strings.Contains(args, want) {
-			t.Errorf("run args missing %q:\n%s", want, args)
+	common := pl.ExtraRW[0]
+	gitDir := filepath.Join(common, "worktrees", filepath.Base(wt))
+	for _, want := range []string{filepath.Join(root, ".git"), filepath.Join(gitDir, "commondir")} {
+		if !strings.Contains(ro, want) {
+			t.Errorf("linked worktree pointer %s must be read-only: %v", want, pl.ReadOnly)
 		}
+	}
+	// Every directory between a mount root and a protected path is pinned so
+	// it can't be renamed out from under the read-only mounts.
+	pins := strings.Join(pl.Pin, ",")
+	for _, want := range []string{filepath.Join(common, "worktrees"), gitDir} {
+		if !strings.Contains(","+pins+",", ","+want+",") {
+			t.Errorf("missing pin %s: %v", want, pl.Pin)
+		}
+	}
+	spec := pl.Spec(g, "192.168.64.2", map[string]string{"zoo.backend": "fake"})
+	if spec.CPUs != 4 || spec.Memory != "4G" || spec.Pids != 2048 || spec.Labels["zoo.backend"] != "fake" || spec.Labels[LabelWorktree] != root {
+		t.Errorf("spec: %+v", spec)
+	}
+	if len(spec.Mounts) != 2 || spec.Mounts[0].Source != root || spec.Mounts[0].Target != root || spec.Mounts[0].ReadOnly {
+		t.Errorf("mounts: %+v", spec.Mounts)
+	}
+	if !strings.Contains(strings.Join(spec.Env, " "), "HTTPS_PROXY=http://192.168.64.2:3128") {
+		t.Errorf("env: %v", spec.Env)
 	}
 	if NameFor(root) != NameFor(root) || !strings.HasPrefix(NameFor(root), "repo-feature-") {
 		t.Errorf("name: %s", NameFor(root))
+	}
+}
+
+func TestPlanMainCheckoutPinsGitDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	root := t.TempDir()
+	if out, err := exec.Command("git", "-C", root, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	_ = os.RemoveAll(filepath.Join(root, ".git", "hooks"))
+	root, _ = Root(root)
+	pl, err := NewPlan(root, config.Defaults(), config.Project{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pl.ExtraRW) != 0 {
+		t.Errorf("main checkout needs no extra mounts: %v", pl.ExtraRW)
+	}
+	if len(pl.Pin) != 1 || pl.Pin[0] != filepath.Join(root, ".git") {
+		t.Errorf("want .git pinned (else `mv .git .git2` escapes the read-only mounts): %v", pl.Pin)
+	}
+	if st, err := os.Stat(filepath.Join(root, ".git", "hooks")); err != nil || !st.IsDir() {
+		t.Error("plan must create a missing .git/hooks so the agent can't")
 	}
 }

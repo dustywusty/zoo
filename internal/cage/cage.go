@@ -2,6 +2,7 @@
 package cage
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
@@ -14,8 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dusty/zoo/internal/backend"
 	"github.com/dusty/zoo/internal/config"
-	"github.com/dusty/zoo/internal/ctr"
 	"github.com/dusty/zoo/internal/keeper"
 )
 
@@ -28,6 +29,9 @@ const (
 	LabelSize     = "zoo.size"
 	LabelCPUs     = "zoo.cpus"
 	LabelMemory   = "zoo.memory"
+	LabelBackend  = "zoo.backend"
+	LabelIso      = "zoo.isolation"
+	LabelWeaker   = "zoo.weaker-isolation" // set when started below the isolation floor
 )
 
 // Plan is everything needed to create a cage for one worktree.
@@ -38,6 +42,7 @@ type Plan struct {
 	ExtraRW  []string // other host paths mounted rw (a worktree's main .git)
 	Masks    []string // secret files hidden inside the cage
 	ReadOnly []string // paths made read-only inside the cage
+	Pin      []string // directories mounted onto themselves so they can't be renamed
 	SizeName string
 	Size     config.Size
 }
@@ -86,6 +91,34 @@ func gitPaths(root string) (common, gitDir string) {
 	return filepath.Clean(lines[0]), filepath.Clean(lines[1])
 }
 
+// pinsFor returns every directory between a mount root and a protected path.
+// A rename moves a directory together with the read-only mounts inside it,
+// so after `mv .git .git2` the agent could write a fresh .git/config the host
+// would run. A directory that is itself a mount point can't be renamed.
+func pinsFor(protected, roots []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range protected {
+		var top string
+		for _, r := range roots {
+			if within(p, r) && len(r) > len(top) {
+				top = r
+			}
+		}
+		if top == "" {
+			continue
+		}
+		for d := filepath.Dir(p); d != top && within(d, top); d = filepath.Dir(d) {
+			if !seen[d] {
+				seen[d] = true
+				out = append(out, d)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func within(path, dir string) bool {
 	rel, err := filepath.Rel(dir, path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
@@ -109,11 +142,19 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 		if !within(common, root) {
 			pl.ExtraRW = append(pl.ExtraRW, common)
 		}
+		// Make sure hooks/ exists so the agent can't create it.
+		_ = os.MkdirAll(filepath.Join(common, "hooks"), 0o755)
 		pl.ReadOnly = append(pl.ReadOnly, filepath.Join(common, "hooks"), filepath.Join(common, "config"))
 		if gitDir != "" && gitDir != common {
-			pl.ReadOnly = append(pl.ReadOnly, filepath.Join(gitDir, "config.worktree"))
+			// A linked worktree: its .git file and gitdir pointers decide which
+			// config the host's git reads.
+			pl.ReadOnly = append(pl.ReadOnly,
+				filepath.Join(root, ".git"),
+				filepath.Join(gitDir, "config.worktree"),
+				filepath.Join(gitDir, "commondir"))
 		}
 	}
+	pl.Pin = pinsFor(pl.ReadOnly, append([]string{root}, pl.ExtraRW...))
 
 	pl.Masks = FindMasks(root, append(append([]string{}, g.Masks...), p.Mask...), append(append([]string{}, g.Unmask...), p.Unmask...))
 	return pl, nil
@@ -187,54 +228,61 @@ func ProxyEnv(keeperIP string) []string {
 	}
 }
 
-// RunArgs is the `container run` invocation for a plan.
-func (pl Plan) RunArgs(g config.Global, keeperIP string) []string {
-	args := []string{"run", "-d",
-		"--name", pl.ID,
-		"--network", g.Network,
-		"--no-dns",
-		"-c", fmt.Sprint(pl.Size.CPUs),
-		"-m", pl.Size.Memory,
-		"-l", LabelCage + "=" + pl.Name,
-		"-l", LabelWorktree + "=" + pl.Root,
-		"-l", LabelSize + "=" + pl.SizeName,
-		"-l", LabelCPUs + "=" + fmt.Sprint(pl.Size.CPUs),
-		"-l", LabelMemory + "=" + pl.Size.Memory,
-		"-e", "ZOO_MASKS=" + strings.Join(pl.Masks, "\n"),
-		"-e", "ZOO_READONLY=" + strings.Join(pl.ReadOnly, "\n"),
-		"-e", "ZOO_CAGE=" + pl.Name,
+// Spec is the backend's view of a plan.
+func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) backend.CageSpec {
+	l := map[string]string{
+		LabelCage:     pl.Name,
+		LabelWorktree: pl.Root,
+		LabelSize:     pl.SizeName,
+		LabelCPUs:     fmt.Sprint(pl.Size.CPUs),
+		LabelMemory:   pl.Size.Memory,
 	}
-	for _, e := range ProxyEnv(keeperIP) {
-		args = append(args, "-e", e)
+	for k, v := range labels {
+		l[k] = v
 	}
-	args = append(args, "-v", pl.Root+":"+pl.Root)
+	mounts := []backend.Mount{{Source: pl.Root, Target: pl.Root}}
 	for _, p := range pl.ExtraRW {
-		args = append(args, "-v", p+":"+p)
+		mounts = append(mounts, backend.Mount{Source: p, Target: p})
 	}
-	return append(args, g.CageImage)
+	return backend.CageSpec{
+		ID:       pl.ID,
+		Image:    g.CageImage,
+		CPUs:     pl.Size.CPUs,
+		Memory:   pl.Size.Memory,
+		Pids:     pl.Size.Pids,
+		Labels:   l,
+		Env:      append([]string{"ZOO_CAGE=" + pl.Name}, ProxyEnv(keeperIP)...),
+		Mounts:   mounts,
+		Masks:    pl.Masks,
+		ReadOnly: pl.ReadOnly,
+		Pin:      pl.Pin,
+	}
 }
 
 // Ensure creates or starts the cage. Returns true if it was (re)created.
-func Ensure(pl Plan, g config.Global, keeperIP string) (bool, error) {
-	c, exists := ctr.Get(pl.ID, g.Network)
-	if exists && c.Running() {
+func Ensure(ctx context.Context, b backend.Backend, spec backend.CageSpec) (bool, error) {
+	st, exists, err := b.Get(ctx, spec.ID)
+	if err != nil {
+		return false, err
+	}
+	if exists && st.Running {
 		return false, nil
 	}
 	if exists {
-		if err := ctr.Start(pl.ID); err == nil {
-			return false, waitRunning(pl.ID, g.Network)
+		if err := b.Start(ctx, spec.ID); err == nil {
+			return false, waitRunning(ctx, b, spec.ID)
 		}
-		_ = ctr.Delete(pl.ID)
+		_ = b.Delete(ctx, spec.ID)
 	}
-	if _, err := ctr.Run(pl.RunArgs(g, keeperIP)...); err != nil {
+	if err := b.CreateCage(ctx, spec); err != nil {
 		return false, err
 	}
-	return true, waitRunning(pl.ID, g.Network)
+	return true, waitRunning(ctx, b, spec.ID)
 }
 
-func waitRunning(id, network string) error {
+func waitRunning(ctx context.Context, b backend.Backend, id string) error {
 	for i := 0; i < 40; i++ {
-		if c, ok := ctr.Get(id, network); ok && c.Running() {
+		if st, ok, _ := b.Get(ctx, id); ok && st.Running {
 			return nil
 		}
 		time.Sleep(250 * time.Millisecond)
@@ -242,33 +290,35 @@ func waitRunning(id, network string) error {
 	return fmt.Errorf("cage %s did not reach running state", id)
 }
 
-// Reset deletes the cage so the next run starts from a clean image.
-func Reset(id string) error { return ctr.Delete(id) }
-
 // Info is a cage as listed for humans and the dashboard.
 type Info struct {
-	Name     string `json:"name"`
-	ID       string `json:"id"`
-	Worktree string `json:"worktree"`
-	Size     string `json:"size"`
-	CPUs     string `json:"cpus"`
-	Memory   string `json:"memory"`
-	Status   string `json:"status"`
-	Running  bool   `json:"running"`
-	IP       string `json:"ip"`
+	Name      string `json:"name"`
+	ID        string `json:"id"`
+	Worktree  string `json:"worktree"`
+	Size      string `json:"size"`
+	CPUs      string `json:"cpus"`
+	Memory    string `json:"memory"`
+	Status    string `json:"status"`
+	Running   bool   `json:"running"`
+	IP        string `json:"ip"`
+	Isolation string `json:"isolation"`
+	Weaker    bool   `json:"weaker_isolation"` // started below the isolation floor
 }
 
 // List returns all zoo cages.
-func List(g config.Global) ([]Info, error) {
-	all, err := ctr.List(g.Network)
+func List(ctx context.Context, b backend.Backend) ([]Info, error) {
+	all, err := b.List(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var out []Info
 	for _, c := range all {
+		if c.ID == keeper.Name || c.Labels["zoo.role"] == "keeper" {
+			continue
+		}
 		name := c.Labels[LabelCage]
 		if name == "" {
-			if !strings.HasPrefix(c.ID, Prefix) || c.ID == keeper.Name {
+			if !strings.HasPrefix(c.ID, Prefix) {
 				continue
 			}
 			name = strings.TrimPrefix(c.ID, Prefix)
@@ -276,7 +326,8 @@ func List(g config.Global) ([]Info, error) {
 		out = append(out, Info{
 			Name: name, ID: c.ID, Worktree: c.Labels[LabelWorktree],
 			Size: c.Labels[LabelSize], CPUs: c.Labels[LabelCPUs], Memory: c.Labels[LabelMemory],
-			Status: c.Status, Running: c.Running(), IP: c.IP,
+			Status: c.State, Running: c.Running, IP: c.IP,
+			Isolation: c.Labels[LabelIso], Weaker: c.Labels[LabelWeaker] == "1",
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -284,8 +335,8 @@ func List(g config.Global) ([]Info, error) {
 }
 
 // Find resolves a user-supplied name (short name, id, or worktree path).
-func Find(g config.Global, q string) (Info, error) {
-	all, err := List(g)
+func Find(ctx context.Context, b backend.Backend, q string) (Info, error) {
+	all, err := List(ctx, b)
 	if err != nil {
 		return Info{}, err
 	}

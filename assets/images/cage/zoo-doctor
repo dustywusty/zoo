@@ -41,6 +41,19 @@ else
   fi
 fi
 
+# 4b. Only ports 80/443 go through the keeper.
+if [ -n "${HTTPS_PROXY:-}" ]; then
+  # -f: squid answers a denied request with an HTTP 403, which curl otherwise calls success.
+  if curl -fsS -m 10 -o /dev/null http://api.github.com:22/ 2>/dev/null; then fail "keeper-ports" "port 22 was reachable through the keeper"; else pass "keeper-ports" "non-web ports refused"; fi
+fi
+
+# 4c. Unsetting the proxy doesn't help: there's no other route.
+if env -u HTTPS_PROXY -u https_proxy curl -sS -m 5 -o /dev/null https://api.github.com 2>/dev/null; then
+  fail "proxy-bypass" "reached api.github.com without the keeper"
+else
+  pass "proxy-bypass" "no route without the keeper"
+fi
+
 # 5. Masked secrets are empty.
 if [ -n "${ZOO_MASKS:-}" ]; then
   bad=0; n=0
@@ -69,6 +82,40 @@ if [ -n "${ZOO_READONLY:-}" ]; then
   done <<< "$ZOO_READONLY"
 fi
 
+# 6b. Directories holding read-only paths can't be renamed (a rename would
+# carry the read-only mounts away and let the agent plant a fresh .git/config).
+if [ -n "${ZOO_PIN:-}" ]; then
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ -d "$p" ] || continue
+    if mv "$p" "$p.zoo-doctor" 2>/dev/null; then
+      mv "$p.zoo-doctor" "$p"
+      fail "git-pin" "$p could be renamed"
+    else
+      pass "git-pin" "$p can't be renamed"
+    fi
+  done <<< "$ZOO_PIN"
+fi
+
+# 6c. Nothing from the host beyond the worktree.
+leaks=""
+[ -n "${SSH_AUTH_SOCK:-}" ] && leaks="$leaks SSH_AUTH_SOCK"
+for s in /var/run/docker.sock /run/docker.sock "$HOME/.ssh/id_rsa" "$HOME/.ssh/id_ed25519" "$HOME/.aws/credentials"; do
+  [ -e "$s" ] && leaks="$leaks $s"
+done
+if [ -n "$leaks" ]; then fail "host-leak" "visible in the cage:$leaks"; else pass "host-leak" "no SSH agent, Docker socket or host credentials"; fi
+
+# 6d. Process limit is set.
+pids=$(cat /sys/fs/cgroup/pids.max 2>/dev/null || echo max)
+nproc=$(ulimit -u 2>/dev/null || echo unlimited)
+if [ "$pids" != "max" ]; then
+  pass "pids-limit" "cgroup pids.max $pids"
+elif [ "$nproc" != "unlimited" ]; then
+  pass "pids-limit" "ulimit -u $nproc"
+else
+  fail "pids-limit" "no process limit (fork bombs aren't capped)"
+fi
+
 # 7. zoo-init problems.
 if [ -r /run/zoo/init.log ] && grep -q '^FAIL' /run/zoo/init.log; then
   warn "init" "$(grep '^FAIL' /run/zoo/init.log | tr '\n' ';')"
@@ -92,8 +139,22 @@ if [ -n "$gw" ]; then
     if timeout 1 bash -c "</dev/tcp/$gw/$port" 2>/dev/null; then open="$open $port"; fi
   done
   if [ -n "$open" ]; then
-    warn "host-exposure" "Mac services reachable at $gw on port(s):$open (bind them to 127.0.0.1)"
+    # Apple can't stop this (apple/container#1320): warn. Backends that claim
+    # an isolated gateway fail.
+    if [ "${ZOO_HOST_GATEWAY_EXPECTED:-true}" = "true" ]; then
+      warn "host-exposure" "host services reachable at $gw on port(s):$open (bind them to 127.0.0.1)"
+    else
+      fail "host-exposure" "host services reachable at $gw on port(s):$open"
+    fi
   else
-    pass "host-exposure" "no common Mac ports reachable at $gw"
+    pass "host-exposure" "no common host ports reachable at $gw"
   fi
 fi
+
+# 11. The dashboard isn't reachable from the cage.
+port=${ZOO_DASH_PORT:-7777}
+hit=""
+for h in $gw ${ZOO_KEEPER:-}; do
+  if timeout 1 bash -c "</dev/tcp/$h/$port" 2>/dev/null; then hit="$hit $h"; fi
+done
+if [ -n "$hit" ]; then fail "dashboard" "port $port reachable at$hit"; else pass "dashboard" "port $port unreachable"; fi

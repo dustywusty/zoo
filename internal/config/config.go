@@ -17,6 +17,7 @@ import (
 type Size struct {
 	CPUs   int    `yaml:"cpus" json:"cpus"`
 	Memory string `yaml:"memory" json:"memory"` // e.g. "2G"
+	Pids   int    `yaml:"pids" json:"pids"`     // process limit
 }
 
 // Harness says how to launch an agent CLI inside a cage and which keychain
@@ -41,6 +42,19 @@ type Global struct {
 	CageImage     string             `yaml:"cage_image"`
 	KeeperImage   string             `yaml:"keeper_image"`
 	Network       string             `yaml:"network"`
+
+	// Backend picks the runtime: auto | apple | docker | podman.
+	Backend string `yaml:"backend"`
+	// IsolationFloor refuses cages weaker than this: vm | microvm |
+	// sandboxed-container | container. Docker with runc is "container".
+	IsolationFloor string `yaml:"isolation_floor"`
+	Docker         Docker `yaml:"docker"`
+}
+
+// Docker configures the docker/podman backend.
+type Docker struct {
+	Bin     string `yaml:"bin"`     // docker (default) or a path; podman has its own backend name
+	Runtime string `yaml:"runtime"` // OCI runtime: "" (daemon default) | runc | runsc | kata
 }
 
 // Project is zoo.yaml at a worktree root. Everything is optional.
@@ -56,10 +70,10 @@ func Defaults() Global {
 		Port:        7777,
 		DefaultSize: "small",
 		Sizes: map[string]Size{
-			"tiny":   {CPUs: 1, Memory: "1G"},
-			"small":  {CPUs: 2, Memory: "2G"},
-			"medium": {CPUs: 4, Memory: "4G"},
-			"large":  {CPUs: 6, Memory: "8G"},
+			"tiny":   {CPUs: 1, Memory: "1G", Pids: 512},
+			"small":  {CPUs: 2, Memory: "2G", Pids: 1024},
+			"medium": {CPUs: 4, Memory: "4G", Pids: 2048},
+			"large":  {CPUs: 6, Memory: "8G", Pids: 4096},
 		},
 		Masks:  []string{".env", ".env.*", "*.pem", "*.key", "*.p12", "id_rsa*", "id_ed25519*", ".npmrc", ".pypirc", ".netrc"},
 		Unmask: []string{".env.example", ".env.sample", ".env.template", "*.pub"},
@@ -68,10 +82,12 @@ func Defaults() Global {
 			"codex":  {Command: "codex", Env: map[string]string{"OPENAI_API_KEY": "codex"}, Files: map[string]string{".codex/auth.json": "codex-auth"}},
 			"shell":  {Command: "bash"},
 		},
-		BytesOutAlert: 5 << 20,
-		CageImage:     "zoo-cage:latest",
-		KeeperImage:   "zoo-keeper:latest",
-		Network:       "zoo-cages",
+		BytesOutAlert:  5 << 20,
+		CageImage:      "zoo-cage:latest",
+		KeeperImage:    "zoo-keeper:latest",
+		Network:        "zoo-cages",
+		Backend:        "auto",
+		IsolationFloor: "microvm",
 	}
 }
 
@@ -127,6 +143,18 @@ func merge(g *Global, f Global) {
 	if f.Network != "" {
 		g.Network = f.Network
 	}
+	if f.Backend != "" {
+		g.Backend = f.Backend
+	}
+	if f.IsolationFloor != "" {
+		g.IsolationFloor = f.IsolationFloor
+	}
+	if f.Docker.Bin != "" {
+		g.Docker.Bin = f.Docker.Bin
+	}
+	if f.Docker.Runtime != "" {
+		g.Docker.Runtime = f.Docker.Runtime
+	}
 }
 
 // LoadProject reads <root>/zoo.yaml if present.
@@ -151,12 +179,15 @@ func (g Global) ResolveSize(name string) (string, Size, error) {
 		name = g.DefaultSize
 	}
 	if s, ok := g.Sizes[name]; ok {
+		if s.Pids <= 0 {
+			s.Pids = defaultPids(s.CPUs)
+		}
 		return name, s, nil
 	}
 	if cpu, mem, ok := strings.Cut(name, ":"); ok {
 		var n int
 		if _, err := fmt.Sscanf(cpu, "%d", &n); err == nil && n > 0 && mem != "" {
-			return "custom", Size{CPUs: n, Memory: strings.ToUpper(mem)}, nil
+			return "custom", Size{CPUs: n, Memory: strings.ToUpper(mem), Pids: defaultPids(n)}, nil
 		}
 	}
 	names := make([]string, 0, len(g.Sizes))
@@ -167,6 +198,9 @@ func (g Global) ResolveSize(name string) (string, Size, error) {
 	return "", Size{}, fmt.Errorf("unknown size %q (have: %s, or cpus:memory like 3:6G)", name, strings.Join(names, ", "))
 }
 
+// defaultPids scales the process limit with CPUs, as the built-in sizes do.
+func defaultPids(cpus int) int { return max(512, cpus*512) }
+
 // WriteDefaultIfMissing writes a commented starter config.
 func WriteDefaultIfMissing() error {
 	if _, err := os.Stat(paths.Config()); err == nil {
@@ -176,13 +210,17 @@ func WriteDefaultIfMissing() error {
 }
 
 const starter = `# zoo global config. Everything here is optional; defaults are shown.
+# backend: auto              # auto | apple | docker | podman
+# isolation_floor: microvm   # refuse cages weaker than this. Docker with runc is
+#                            # "container" (shared kernel): set "container" to allow it
+# docker: { bin: docker, runtime: "" }   # runtime: runsc (gVisor) or kata for stronger isolation
 # port: 7777                 # dashboard, bound to 127.0.0.1 only
 # default_size: small
 # sizes:
-#   tiny:   { cpus: 1, memory: 1G }
-#   small:  { cpus: 2, memory: 2G }
-#   medium: { cpus: 4, memory: 4G }
-#   large:  { cpus: 6, memory: 8G }
+#   tiny:   { cpus: 1, memory: 1G, pids: 512 }
+#   small:  { cpus: 2, memory: 2G, pids: 1024 }
+#   medium: { cpus: 4, memory: 4G, pids: 2048 }
+#   large:  { cpus: 6, memory: 8G, pids: 4096 }
 # masks: [".env", ".env.*", "*.pem", "*.key", "*.p12", "id_rsa*", "id_ed25519*", ".npmrc", ".pypirc", ".netrc"]
 # unmask: [".env.example", ".env.sample", ".env.template", "*.pub"]
 # bytes_out_alert: 5242880   # alert when one cage sends this much to one host

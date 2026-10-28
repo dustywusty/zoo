@@ -1,8 +1,14 @@
 #!/bin/sh
 # zoo-init: PID 1 of every cage. Runs as root, once, before any agent starts.
 #
+#   ZOO_GUARD     "host" when the backend already applied masks and read-only
+#                 paths as host-side mounts (apple, docker): nothing to do here,
+#                 and the cage can run with every capability dropped
 #   ZOO_MASKS     newline-separated absolute paths to hide (secrets in the worktree)
 #   ZOO_READONLY  newline-separated absolute paths to make read-only (.git/hooks, .git/config)
+#
+# Guest-side masking needs CAP_SYS_ADMIN; without it every mask would fail,
+# so that is detected up front and reported once, clearly.
 #
 # Results go to /run/zoo/init.log so `zoo doctor` can report what held.
 set -u
@@ -38,10 +44,24 @@ readonly_path() {
   fi
 }
 
-if [ -n "${ZOO_MASKS:-}" ]; then
+# CAP_SYS_ADMIN is bit 21 of the effective capability mask.
+has_mount_cap() {
+  capeff=$(awk '/^CapEff:/ {print $2}' /proc/self/status 2>/dev/null)
+  [ -n "$capeff" ] || return 1
+  [ $(( 0x$capeff >> 21 & 1 )) -eq 1 ]
+}
+
+if [ "${ZOO_GUARD:-}" = "host" ]; then
+  ok "guard applied by host mounts"
+elif { [ -n "${ZOO_MASKS:-}" ] || [ -n "${ZOO_READONLY:-}" ]; } && ! has_mount_cap; then
+  fail "no mount capability (CAP_SYS_ADMIN) in this guest: secrets are NOT masked and .git is NOT read-only"
+  ZOO_MASKS="" ZOO_READONLY=""
+fi
+
+if [ -n "${ZOO_MASKS:-}" ] && [ "${ZOO_GUARD:-}" != "host" ]; then
   printf '%s\n' "$ZOO_MASKS" | while IFS= read -r p; do [ -n "$p" ] && mask "$p"; done
 fi
-if [ -n "${ZOO_READONLY:-}" ]; then
+if [ -n "${ZOO_READONLY:-}" ] && [ "${ZOO_GUARD:-}" != "host" ]; then
   printf '%s\n' "$ZOO_READONLY" | while IFS= read -r p; do [ -n "$p" ] && readonly_path "$p"; done
 fi
 

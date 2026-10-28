@@ -72,16 +72,40 @@ func TestAllowDenyPrune(t *testing.T) {
 func TestLearn(t *testing.T) {
 	t.Setenv("ZOO_HOME", t.TempDir())
 	_ = EnsureFiles()
-	_ = SetLearn("192.168.64.9", true)
-	if !LearnIPs()["192.168.64.9"] {
-		t.Fatal("learn on failed")
+	_ = SetLearn("api-1a2b3c", true)
+	if changed, _ := SyncLearn(map[string]string{"api-1a2b3c": "192.168.64.9", "web-4d5e6f": "192.168.64.10"}); !changed {
+		t.Fatal("sync should report a change")
 	}
-	_ = SetLearn("192.168.64.9", false)
+	if ips := LearnIPs(); !ips["192.168.64.9"] || ips["192.168.64.10"] {
+		t.Fatalf("learn on: %v", ips)
+	}
+	if changed, _ := SyncLearn(map[string]string{"api-1a2b3c": "192.168.64.9"}); changed {
+		t.Fatal("no-op sync reported a change")
+	}
+	// The cage restarted with a new IP and another cage got the old one:
+	// learn mode must follow the cage, not the address.
+	_, _ = SyncLearn(map[string]string{"api-1a2b3c": "192.168.64.20", "web-4d5e6f": "192.168.64.9"})
+	if ips := LearnIPs(); ips["192.168.64.9"] || !ips["192.168.64.20"] {
+		t.Fatalf("learn followed the IP, not the cage: %v", ips)
+	}
+	_ = SetLearn("api-1a2b3c", false)
+	_, _ = SyncLearn(map[string]string{"api-1a2b3c": "192.168.64.20"})
 	if len(LearnIPs()) != 0 {
 		t.Fatal("learn off failed")
 	}
 	b, _ := os.ReadFile(paths.LearnList())
 	if !strings.Contains(string(b), learnPlaceholder) {
 		t.Fatal("placeholder missing; squid needs a non-empty src acl")
+	}
+}
+
+func TestSquidConfNoReverseLookup(t *testing.T) {
+	t.Setenv("ZOO_HOME", t.TempDir())
+	if err := EnsureFiles(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(paths.SquidConf())
+	if !strings.Contains(string(b), `dstdomain -n "/etc/zoo/allowlist.txt"`) {
+		t.Fatal("allowlist acl must use -n so IP literals aren't matched by their PTR name")
 	}
 }

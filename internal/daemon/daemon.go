@@ -20,9 +20,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dusty/zoo/internal/backend"
 	"github.com/dusty/zoo/internal/cage"
 	"github.com/dusty/zoo/internal/config"
-	"github.com/dusty/zoo/internal/ctr"
 	"github.com/dusty/zoo/internal/keeper"
 	"github.com/dusty/zoo/internal/paths"
 )
@@ -68,8 +68,11 @@ type Session struct {
 }
 
 type Server struct {
-	cfg   config.Global
-	token string
+	cfg     config.Global
+	token   string
+	backend backend.Backend
+	info    backend.Info
+	floor   backend.Isolation
 
 	mu        sync.Mutex
 	cages     []cage.Info
@@ -102,13 +105,14 @@ func Token() (string, error) {
 	return t, os.WriteFile(paths.Token(), []byte(t+"\n"), 0o600)
 }
 
-func New(cfg config.Global) (*Server, error) {
+func New(cfg config.Global, b backend.Backend, floor backend.Isolation) (*Server, error) {
 	tok, err := Token()
 	if err != nil {
 		return nil, err
 	}
 	return &Server{
-		cfg: cfg, token: tok,
+		cfg: cfg, token: tok, backend: b, floor: floor,
+		info:  b.Detect(context.Background()),
 		stats: map[string]Stat{}, counts: map[string]*Counts{},
 		seen: map[string]map[string]bool{}, sentBytes: map[string]int64{},
 		alerted: map[string]time.Time{}, sessions: map[string]Session{},
@@ -166,8 +170,23 @@ func (s *Server) loop(ctx context.Context, every time.Duration, fn func()) {
 // --- polling ---------------------------------------------------------------
 
 func (s *Server) pollCages() {
-	cs, err := cage.List(s.cfg)
-	kc, kok := ctr.Get(keeper.Name, s.cfg.Network)
+	ctx := context.Background()
+	cs, err := cage.List(ctx, s.backend)
+	kc, kok, _ := s.backend.Get(ctx, keeper.Name)
+	if err == nil {
+		// Keep learn mode attached to cages whose IPs changed.
+		running := map[string]string{}
+		for _, c := range cs {
+			if c.Running {
+				running[c.Name] = c.IP
+			}
+		}
+		if changed, _ := keeper.SyncLearn(running); changed && kok && kc.Running {
+			if rerr := keeper.Reload(ctx, s.backend); rerr != nil {
+				log.Printf("keeper reload after learn sync: %v", rerr)
+			}
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err != nil {
@@ -176,7 +195,7 @@ func (s *Server) pollCages() {
 	}
 	s.lastErr = ""
 	s.cages = cs
-	s.keeperUp = kok && kc.Running()
+	s.keeperUp = kok && kc.Running
 	s.keeperIP = kc.IP
 	// Drop sessions whose `zoo run` process is gone (killed without cleanup).
 	for id, ss := range s.sessions {
@@ -195,7 +214,7 @@ func alive(pid int) bool {
 }
 
 func (s *Server) pollStats() {
-	arr, err := ctr.Stats()
+	samples, err := s.backend.Sample(context.Background())
 	if err != nil {
 		return
 	}
@@ -203,17 +222,12 @@ func (s *Server) pollStats() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	next := map[string]Stat{}
-	for _, el := range arr {
-		id, _ := parseStat(el, nil, now)
-		if id == "" {
-			continue
-		}
+	for _, sm := range samples {
 		var prev *Stat
-		if p, ok := s.stats[id]; ok {
+		if p, ok := s.stats[sm.ID]; ok {
 			prev = &p
 		}
-		_, st := parseStat(el, prev, now)
-		next[id] = st
+		next[sm.ID] = toStat(sm, prev, now)
 	}
 	s.stats = next
 }
@@ -414,6 +428,7 @@ type cageView struct {
 }
 
 type stateView struct {
+	Backend   any        `json:"backend"`
 	Cages     []cageView `json:"cages"`
 	Keeper    any        `json:"keeper"`
 	Allowlist []string   `json:"allowlist"`
@@ -426,6 +441,10 @@ func (s *Server) snapshot() stateView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := stateView{
+		Backend: map[string]any{
+			"name": s.info.Name, "detail": s.info.Detail, "version": s.info.Version,
+			"isolation": s.info.Caps.Isolation, "floor": s.floor,
+		},
 		Keeper:    map[string]any{"running": s.keeperUp, "ip": s.keeperIP},
 		Allowlist: append([]string(nil), s.allowlist...),
 		Error:     s.lastErr,
@@ -551,7 +570,13 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not a cage", http.StatusBadRequest)
 		return
 	}
-	if err := ctr.Stop(id); err != nil {
+	ctx := r.Context()
+	for _, c := range s.snapshot().Cages {
+		if c.ID == id {
+			_ = keeper.SetLearn(c.Name, false)
+		}
+	}
+	if err := s.backend.Stop(ctx, id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -573,7 +598,7 @@ func (s *Server) handleAllow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(added) > 0 {
-		if err := keeper.Reload(); err != nil {
+		if err := keeper.Reload(r.Context(), s.backend); err != nil {
 			http.Error(w, "saved, but keeper reload failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}

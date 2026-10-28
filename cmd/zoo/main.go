@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,9 +25,11 @@ import (
 	"time"
 
 	"github.com/dusty/zoo/assets"
+	"github.com/dusty/zoo/internal/backend"
+	_ "github.com/dusty/zoo/internal/backend/apple"
+	_ "github.com/dusty/zoo/internal/backend/docker"
 	"github.com/dusty/zoo/internal/cage"
 	"github.com/dusty/zoo/internal/config"
-	"github.com/dusty/zoo/internal/ctr"
 	"github.com/dusty/zoo/internal/daemon"
 	"github.com/dusty/zoo/internal/keeper"
 	"github.com/dusty/zoo/internal/keys"
@@ -60,18 +63,29 @@ Usage:
   zoo doctor [cage]              prove the walls hold from inside a cage
   zoo dash                       open the dashboard
   zoo build [cage|keeper]        (re)build images
+  zoo backend [list|use <name>]  show runtimes and their isolation; pick one (apple, docker, podman, auto)
+  zoo status                     backend, keeper, daemon, isolation, shims
   zoo version
+
+Global flags (any command):
+  --backend NAME                 apple | docker | podman | auto (zoo up remembers it)
+  --isolation-floor LEVEL        vm | microvm | sandboxed-container | container (zoo up remembers it)
+  --allow-weaker-isolation       start this cage even if the backend is below the floor
 
 Escape hatch: ZOO=off claude ...  runs the real CLI outside any cage.
 `
 
 func main() {
-	if len(os.Args) < 2 {
+	argv, err := parseGlobal(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "zoo:", err)
+		os.Exit(2)
+	}
+	if len(argv) < 1 {
 		fmt.Print(usage)
 		os.Exit(2)
 	}
-	cmd, args := os.Args[1], os.Args[2:]
-	var err error
+	cmd, args := argv[0], argv[1:]
 	switch cmd {
 	case "up":
 		err = cmdUp()
@@ -109,6 +123,10 @@ func main() {
 		err = cmdBuild(args)
 	case "daemon":
 		err = cmdDaemon()
+	case "backend", "backends":
+		err = cmdBackend(args)
+	case "status":
+		err = cmdStatus()
 	case "version", "--version", "-v":
 		fmt.Println("zoo", version)
 	case "help", "--help", "-h":
@@ -121,6 +139,10 @@ func main() {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			os.Exit(ee.ExitCode())
+		}
+		var ec exitCode
+		if errors.As(err, &ec) {
+			os.Exit(int(ec))
 		}
 		fmt.Fprintln(os.Stderr, "zoo:", err)
 		os.Exit(1)
@@ -139,33 +161,37 @@ func loadCfg() (config.Global, error) {
 
 func say(format string, a ...any) { fmt.Fprintf(os.Stderr, "zoo: "+format+"\n", a...) }
 
-// ensureSystem checks the container CLI and service, and builds missing images.
-func ensureSystem(g config.Global) error {
-	if !ctr.Installed() {
-		return errors.New("Apple's `container` CLI isn't installed. Get it from https://github.com/apple/container/releases (macOS 26+, Apple silicon)")
+// ensureSystem starts the runtime if needed and builds missing images.
+func ensureSystem(ctx context.Context, b backend.Backend, g config.Global) error {
+	info := b.Detect(ctx)
+	if !info.Installed {
+		return fmt.Errorf("%s backend: not installed: %s", b.Name(), info.Hint)
 	}
-	if !ctr.SystemRunning() {
-		say("starting the container service…")
-		if err := ctr.SystemStart(); err != nil {
-			return fmt.Errorf("container system start: %w", err)
-		}
-	}
-	if !ctr.ImageExists(g.KeeperImage) {
-		say("building the keeper image (first run only)…")
-		if err := buildImage("keeper", g.KeeperImage); err != nil {
+	if !info.Running {
+		say("starting %s…", b.Name())
+		if err := b.Prepare(ctx); err != nil {
 			return err
 		}
 	}
-	if !ctr.ImageExists(g.CageImage) {
-		say("building the cage image (first run only, a few minutes)…")
-		if err := buildImage("cage", g.CageImage); err != nil {
+	for _, im := range []struct{ which, tag, note string }{
+		{"keeper", g.KeeperImage, "first run only"},
+		{"cage", g.CageImage, "first run only, a few minutes"},
+	} {
+		ok, err := b.ImageExists(ctx, im.tag)
+		if err != nil {
 			return err
+		}
+		if !ok {
+			say("building the %s image on %s (%s)…", im.which, b.Name(), im.note)
+			if err := buildImage(ctx, b, im.which, im.tag); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func buildImage(which, tag string) error {
+func buildImage(ctx context.Context, b backend.Backend, which, tag string) error {
 	dir, err := assets.WriteImage(which, paths.Build())
 	if err != nil {
 		return err
@@ -175,20 +201,20 @@ func buildImage(which, tag string) error {
 		args["AGENT_UID"] = strconv.Itoa(os.Getuid())
 		args["AGENT_GID"] = strconv.Itoa(os.Getgid())
 	}
-	return ctr.Build(tag, dir, args)
+	return b.BuildImage(ctx, backend.ImageSpec{Tag: tag, Context: dir, BuildArgs: args})
 }
 
 // ensureUp brings up the keeper and the daemon. Returns the keeper IP.
-func ensureUp(g config.Global) (string, error) {
-	if err := ensureSystem(g); err != nil {
+func ensureUp(ctx context.Context, e env) (string, error) {
+	if err := ensureSystem(ctx, e.b, e.g); err != nil {
 		return "", err
 	}
-	ip, err := keeper.Up(g)
+	ip, err := keeper.Up(ctx, e.b, e.g)
 	if err != nil {
 		return "", err
 	}
-	if !daemonAlive(g) {
-		if err := startDaemon(g); err != nil {
+	if !daemonAlive(e.g) {
+		if err := startDaemon(e.g); err != nil {
 			say("dashboard didn't start: %v (see %s)", err, paths.DaemonLog())
 		}
 	}
@@ -200,9 +226,38 @@ func cmdUp() error {
 	if err != nil {
 		return err
 	}
-	ip, err := ensureUp(g)
+	// Remember an explicit backend / floor so later commands and the daemon
+	// agree; a plain `zoo up` drops a remembered floor override.
+	old := keeper.LoadState()
+	st := old
+	if flagBackend != "" {
+		st.Backend = flagBackend
+		if flagBackend == "auto" {
+			st.Backend = ""
+		}
+	}
+	st.IsolationFloor = flagFloor
+	if st.Backend != old.Backend || st.IsolationFloor != old.IsolationFloor {
+		if daemonAlive(g) {
+			stopDaemon() // restart it on the new backend
+			time.Sleep(300 * time.Millisecond)
+		}
+		if err := keeper.SaveState(st); err != nil {
+			return err
+		}
+	}
+	ctx := context.Background()
+	e, err := resolve(ctx, g)
 	if err != nil {
 		return err
+	}
+	ip, err := ensureUp(ctx, e)
+	if err != nil {
+		return err
+	}
+	say("backend %s (%s isolation%s)", e.b.Name(), e.info.Caps.Isolation, detailSuffix(e.info))
+	if !e.info.Caps.Isolation.AtLeast(e.floor) {
+		say("warning: %s gives %s isolation, below your floor (%s); cages won't start without --allow-weaker-isolation or `isolation_floor: %s`", e.b.Name(), e.info.Caps.Isolation, e.floor, e.info.Caps.Isolation)
 	}
 	say("keeper on %s", keeper.ProxyURL(ip))
 	say("dashboard on http://127.0.0.1:%d", g.Port)
@@ -220,17 +275,23 @@ func cmdDown(args []string) error {
 	if err != nil {
 		return err
 	}
+	ctx := context.Background()
+	e, err := resolve(ctx, g)
+	if err != nil {
+		return err
+	}
 	if *all {
-		cs, _ := cage.List(g)
+		cs, _ := cage.List(ctx, e.b)
 		for _, c := range cs {
 			if c.Running {
 				say("stopping %s", c.Name)
-				_ = ctr.Stop(c.ID)
+				_ = keeper.SetLearn(c.Name, false)
+				_ = e.b.Stop(ctx, c.ID)
 			}
 		}
 	}
 	stopDaemon()
-	if err := keeper.Down(); err != nil {
+	if err := keeper.Down(ctx, e.b); err != nil {
 		say("keeper: %v", err)
 	}
 	say("down")
@@ -295,7 +356,11 @@ func cmdDaemon() error {
 	if err != nil {
 		return err
 	}
-	s, err := daemon.New(g)
+	e, err := resolve(context.Background(), g)
+	if err != nil {
+		return err
+	}
+	s, err := daemon.New(g, e.b, e.floor)
 	if err != nil {
 		return err
 	}
@@ -315,7 +380,11 @@ func cmdDash() error {
 		}
 	}
 	url := fmt.Sprintf("http://127.0.0.1:%d", g.Port)
-	if err := exec.Command("open", url).Run(); err != nil {
+	opener := "open"
+	if runtime.GOOS != "darwin" {
+		opener = "xdg-open"
+	}
+	if err := exec.Command(opener, url).Run(); err != nil {
 		fmt.Println(url)
 	}
 	return nil
@@ -381,14 +450,17 @@ func cmdShell(args []string) error {
 
 // prepare brings everything up and returns the cage plan for the current dir
 // (or the named cage) plus the keeper IP.
-func prepare(g config.Global, cageName, size string) (cage.Plan, string, error) {
-	ip, err := ensureUp(g)
+func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, string, error) {
+	if !e.info.Caps.Isolation.AtLeast(e.floor) && !flagAllowWeaker {
+		return cage.Plan{}, "", weakerErr(e)
+	}
+	ip, err := ensureUp(ctx, e)
 	if err != nil {
 		return cage.Plan{}, "", err
 	}
 	root := ""
 	if cageName != "" {
-		c, err := cage.Find(g, cageName)
+		c, err := cage.Find(ctx, e.b, cageName)
 		if err != nil {
 			return cage.Plan{}, "", err
 		}
@@ -409,25 +481,61 @@ func prepare(g config.Global, cageName, size string) (cage.Plan, string, error) 
 	if err != nil {
 		return cage.Plan{}, "", err
 	}
-	pl, err := cage.NewPlan(root, g, proj, size)
+	pl, err := cage.NewPlan(root, e.g, proj, size)
 	if err != nil {
 		return cage.Plan{}, "", err
 	}
-	if existing, ok := ctr.Get(pl.ID, g.Network); ok && size != "" && existing.Labels[cage.LabelSize] != pl.SizeName {
+	if existing, ok, _ := e.b.Get(ctx, pl.ID); ok && size != "" && existing.Labels[cage.LabelSize] != pl.SizeName {
 		say("resizing %s from %s to %s (restarts the cage; the worktree is untouched)", pl.Name, existing.Labels[cage.LabelSize], pl.SizeName)
-		_ = cage.Reset(pl.ID)
+		_ = e.b.Delete(ctx, pl.ID)
 	}
-	created, err := cage.Ensure(pl, g, ip)
+	labels := map[string]string{
+		cage.LabelBackend: e.b.Name(),
+		cage.LabelIso:     string(e.info.Caps.Isolation),
+	}
+	if !e.info.Caps.Isolation.AtLeast(e.floor) {
+		labels[cage.LabelWeaker] = "1"
+		say("WARNING: %s runs with %s isolation, below your floor (%s), because of --allow-weaker-isolation", pl.Name, e.info.Caps.Isolation, e.floor)
+	}
+	created, err := cage.Ensure(ctx, e.b, pl.Spec(e.g, ip, labels))
 	if err != nil {
 		return pl, ip, err
 	}
 	if created {
-		say("cage %s up (%s: %d CPU, %s) for %s", pl.Name, pl.SizeName, pl.Size.CPUs, pl.Size.Memory, pl.Root)
+		say("cage %s up on %s (%s: %d CPU, %s, %s isolation) for %s", pl.Name, e.b.Name(), pl.SizeName, pl.Size.CPUs, pl.Size.Memory, e.info.Caps.Isolation, pl.Root)
 		if len(pl.Masks) > 0 {
 			say("hiding %d secret file(s) inside the cage", len(pl.Masks))
 		}
 	}
+	syncLearn(ctx, e)
 	return pl, ip, nil
+}
+
+func weakerErr(e env) error {
+	return fmt.Errorf(`%s gives %s isolation (%s), below your isolation floor (%s).
+Cages on it share a kernel with each other%s.
+To accept that: add "isolation_floor: %s" to %s,
+or pass --allow-weaker-isolation for one run, or use a stronger backend (zoo backend)`,
+		e.b.Name(), e.info.Caps.Isolation, strings.TrimPrefix(detailSuffix(e.info), ", "), e.floor,
+		map[bool]string{true: "", false: " and the runtime's VM"}[e.info.Caps.Isolation != backend.IsoContainer],
+		e.info.Caps.Isolation, paths.Config())
+}
+
+// syncLearn re-renders squid's learn ACL from running cages' current IPs.
+func syncLearn(ctx context.Context, e env) {
+	cs, err := cage.List(ctx, e.b)
+	if err != nil {
+		return
+	}
+	running := map[string]string{}
+	for _, c := range cs {
+		if c.Running {
+			running[c.Name] = c.IP
+		}
+	}
+	if changed, err := keeper.SyncLearn(running); err == nil && changed {
+		reloadIfUp(ctx, e)
+	}
 }
 
 func runIn(o runOpts, cageName string) error {
@@ -435,6 +543,7 @@ func runIn(o runOpts, cageName string) error {
 	if err != nil {
 		return err
 	}
+	ctx := context.Background()
 	h, ok := g.Harnesses[o.harness]
 	if !ok {
 		names := make([]string, 0, len(g.Harnesses))
@@ -444,20 +553,23 @@ func runIn(o runOpts, cageName string) error {
 		sort.Strings(names)
 		return fmt.Errorf("unknown harness %q (have: %s; add more under harnesses: in %s)", o.harness, strings.Join(names, ", "), paths.Config())
 	}
-	pl, ip, err := prepare(g, cageName, o.size)
+	e, err := resolve(ctx, g)
+	if err != nil {
+		return err
+	}
+	pl, ip, err := prepare(ctx, e, cageName, o.size)
 	if err != nil {
 		return err
 	}
 	if len(h.Allow) > 0 {
 		if added, _ := keeper.Allow(h.Allow...); len(added) > 0 {
-			_ = keeper.Reload()
+			_ = keeper.Reload(ctx, e.b)
 		}
 	}
 	if o.learn {
-		if c, ok := ctr.Get(pl.ID, g.Network); ok && c.IP != "" {
-			if err := keeper.SetLearn(c.IP, true); err == nil && keeper.Reload() == nil {
-				say("learn mode ON for %s: all egress allowed and logged. `zoo learned` to review, `zoo learn off` to end", pl.Name)
-			}
+		if err := keeper.SetLearn(pl.Name, true); err == nil {
+			syncLearn(ctx, e)
+			say("learn mode ON for %s: all egress allowed and logged. `zoo learned` to review, `zoo learn off` to end", pl.Name)
 		}
 	}
 
@@ -482,7 +594,7 @@ func runIn(o runOpts, cageName string) error {
 		if v == "" {
 			continue
 		}
-		if err := writeGuestFile(pl.ID, "/home/agent/"+rel, v); err != nil {
+		if err := writeGuestFile(ctx, e.b, pl.ID, "/home/agent/"+rel, v); err != nil {
 			say("couldn't place %s in the cage: %v", rel, err)
 		}
 	}
@@ -511,19 +623,30 @@ func runIn(o runOpts, cageName string) error {
 		workdir = wd
 	}
 
-	execArgs := []string{"exec", "-i"}
-	if isTerminal(os.Stdin) && isTerminal(os.Stdout) {
-		execArgs = append(execArgs, "-t")
+	spec := backend.ExecSpec{
+		ID: pl.ID, Cmd: append([]string{h.Command}, o.rest...),
+		User: "agent", Workdir: workdir, EnvFile: envFile,
+		TTY: isTerminal(os.Stdin) && isTerminal(os.Stdout),
 	}
-	execArgs = append(execArgs, "-u", "agent", "-w", workdir, "--env-file", envFile, pl.ID, h.Command)
-	execArgs = append(execArgs, o.rest...)
 
 	sess := registerSession(g, pl.Name, o.harness)
 	defer endSession(g, sess)
 	// Remove the env file once the CLI has read it.
 	go func() { time.Sleep(3 * time.Second); cleanup() }()
-	return ctr.Attach(execArgs...)
+	code, err := e.b.Exec(ctx, spec)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return exitCode(code)
+	}
+	return nil
 }
+
+// exitCode passes an agent's exit status through to zoo's.
+type exitCode int
+
+func (c exitCode) Error() string { return fmt.Sprintf("exit status %d", int(c)) }
 
 func anyKey(files map[string]string) bool {
 	for _, item := range files {
@@ -558,14 +681,18 @@ func writeEnvFile(env []string) (string, func(), error) {
 	return name, func() { _ = os.Remove(name) }, nil
 }
 
-func writeGuestFile(id, path, content string) error {
-	cmd := exec.Command(ctr.Bin(), "exec", "-i", "-u", "agent", id, "sh", "-c",
-		`umask 077 && mkdir -p "$(dirname "$1")" && cat > "$1"`, "sh", path)
-	cmd.Stdin = strings.NewReader(content)
+func writeGuestFile(ctx context.Context, b backend.Backend, id, path, content string) error {
 	var errb bytes.Buffer
-	cmd.Stderr = &errb
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%v: %s", err, strings.TrimSpace(errb.String()))
+	code, err := b.Exec(ctx, backend.ExecSpec{
+		ID: id, User: "agent",
+		Cmd:   []string{"sh", "-c", `umask 077 && mkdir -p "$(dirname "$1")" && cat > "$1"`, "sh", path},
+		Stdin: strings.NewReader(content), Stdout: io.Discard, Stderr: &errb,
+	})
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("exit %d: %s", code, strings.TrimSpace(errb.String()))
 	}
 	return nil
 }
@@ -617,7 +744,12 @@ func cmdLs() error {
 	if err != nil {
 		return err
 	}
-	cs, err := cage.List(g)
+	ctx := context.Background()
+	e, err := resolve(ctx, g)
+	if err != nil {
+		return err
+	}
+	cs, err := cage.List(ctx, e.b)
 	if err != nil {
 		return err
 	}
@@ -625,14 +757,21 @@ func cmdLs() error {
 		fmt.Println("no cages yet. In a repo: zoo run claude")
 		return nil
 	}
-	learn := keeper.LearnIPs()
+	learn := keeper.LearnCages()
 	home, _ := os.UserHomeDir()
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "CAGE\tSTATUS\tSIZE\tIP\tWORKTREE")
+	fmt.Fprintln(tw, "CAGE\tSTATUS\tISOLATION\tSIZE\tIP\tWORKTREE")
 	for _, c := range cs {
 		st := c.Status
-		if learn[c.IP] {
+		if learn[c.Name] {
 			st += " (learn)"
+		}
+		iso := c.Isolation
+		if iso == "" {
+			iso = "?"
+		}
+		if c.Weaker {
+			iso += " (below floor)"
 		}
 		wt := c.Worktree
 		if home != "" && strings.HasPrefix(wt, home) {
@@ -642,7 +781,7 @@ func cmdLs() error {
 		if c.CPUs != "" {
 			size += fmt.Sprintf(" (%s CPU, %s)", c.CPUs, c.Memory)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", c.Name, st, size, c.IP, wt)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", c.Name, st, iso, size, c.IP, wt)
 	}
 	return tw.Flush()
 }
@@ -655,29 +794,34 @@ func cmdStop(args []string) error {
 	if err != nil {
 		return err
 	}
+	ctx := context.Background()
+	e, err := resolve(ctx, g)
+	if err != nil {
+		return err
+	}
+	defer syncLearn(ctx, e)
 	if args[0] == "all" {
-		cs, err := cage.List(g)
+		cs, err := cage.List(ctx, e.b)
 		if err != nil {
 			return err
 		}
 		for _, c := range cs {
 			if c.Running {
 				say("stopping %s", c.Name)
-				if err := ctr.Stop(c.ID); err != nil {
+				_ = keeper.SetLearn(c.Name, false)
+				if err := e.b.Stop(ctx, c.ID); err != nil {
 					say("%v", err)
 				}
 			}
 		}
 		return nil
 	}
-	c, err := cage.Find(g, args[0])
+	c, err := cage.Find(ctx, e.b, args[0])
 	if err != nil {
 		return err
 	}
-	if c.IP != "" {
-		_ = keeper.SetLearn(c.IP, false)
-	}
-	return ctr.Stop(c.ID)
+	_ = keeper.SetLearn(c.Name, false)
+	return e.b.Stop(ctx, c.ID)
 }
 
 func cmdReset(args []string) error {
@@ -688,28 +832,39 @@ func cmdReset(args []string) error {
 	if err != nil {
 		return err
 	}
-	c, err := cage.Find(g, args[0])
+	ctx := context.Background()
+	e, err := resolve(ctx, g)
 	if err != nil {
 		return err
 	}
-	if c.IP != "" {
-		_ = keeper.SetLearn(c.IP, false)
-		_ = keeper.Reload()
-	}
-	if err := cage.Reset(c.ID); err != nil {
+	c, err := cage.Find(ctx, e.b, args[0])
+	if err != nil {
 		return err
 	}
+	_ = keeper.SetLearn(c.Name, false)
+	if err := e.b.Delete(ctx, c.ID); err != nil {
+		return err
+	}
+	syncLearn(ctx, e)
 	say("reset %s; the next `zoo run` there starts from a clean image", c.Name)
 	return nil
 }
 
 // --- allowlist / learn ------------------------------------------------------------
 
-func reloadIfUp() {
-	if c, ok := ctr.Get(keeper.Name, ""); ok && c.Running() {
-		if err := keeper.Reload(); err != nil {
+func reloadIfUp(ctx context.Context, e env) {
+	if c, ok, _ := e.b.Get(ctx, keeper.Name); ok && c.Running {
+		if err := keeper.Reload(ctx, e.b); err != nil {
 			say("keeper reload: %v", err)
 		}
+	}
+}
+
+// reloadKeeper reloads squid on the active backend, if it's up.
+func reloadKeeper(g config.Global) {
+	ctx := context.Background()
+	if e, err := resolve(ctx, g); err == nil {
+		reloadIfUp(ctx, e)
 	}
 }
 
@@ -717,7 +872,8 @@ func cmdAllow(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: zoo allow <host...>")
 	}
-	if _, err := loadCfg(); err != nil {
+	g, err := loadCfg()
+	if err != nil {
 		return err
 	}
 	if err := keeper.EnsureFiles(); err != nil {
@@ -731,7 +887,7 @@ func cmdAllow(args []string) error {
 		say("already allowed")
 		return nil
 	}
-	reloadIfUp()
+	reloadKeeper(g)
 	say("allowed: %s", strings.Join(added, " "))
 	return nil
 }
@@ -740,7 +896,8 @@ func cmdDeny(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: zoo deny <host...>")
 	}
-	if _, err := loadCfg(); err != nil {
+	g, err := loadCfg()
+	if err != nil {
 		return err
 	}
 	removed, err := keeper.Deny(args...)
@@ -751,7 +908,7 @@ func cmdDeny(args []string) error {
 		say("none of those were on the allowlist (a wildcard entry may cover them; see zoo allowlist)")
 		return nil
 	}
-	reloadIfUp()
+	reloadKeeper(g)
 	say("removed: %s", strings.Join(removed, " "))
 	return nil
 }
@@ -771,12 +928,12 @@ func cmdAllowlist() error {
 	return nil
 }
 
-func currentOrNamed(g config.Global, args []string) (cage.Info, error) {
+func currentOrNamed(ctx context.Context, e env, args []string) (cage.Info, error) {
 	if len(args) > 0 {
-		return cage.Find(g, args[0])
+		return cage.Find(ctx, e.b, args[0])
 	}
 	wd, _ := os.Getwd()
-	return cage.Find(g, wd)
+	return cage.Find(ctx, e.b, wd)
 }
 
 func cmdLearn(args []string) error {
@@ -787,18 +944,21 @@ func cmdLearn(args []string) error {
 	if err != nil {
 		return err
 	}
-	c, err := currentOrNamed(g, args[1:])
+	ctx := context.Background()
+	e, err := resolve(ctx, g)
 	if err != nil {
 		return err
 	}
-	if c.IP == "" {
-		return fmt.Errorf("%s has no address (is it running?)", c.Name)
-	}
-	if err := keeper.SetLearn(c.IP, args[0] == "on"); err != nil {
+	c, err := currentOrNamed(ctx, e, args[1:])
+	if err != nil {
 		return err
 	}
-	if err := keeper.Reload(); err != nil {
+	if err := keeper.SetLearn(c.Name, args[0] == "on"); err != nil {
 		return err
+	}
+	syncLearn(ctx, e)
+	if args[0] == "on" && !c.Running {
+		say("%s isn't running; learn mode starts with its next run", c.Name)
 	}
 	say("learn mode %s for %s", strings.ToUpper(args[0]), c.Name)
 	return nil
@@ -811,7 +971,12 @@ func cmdLearned(args []string) error {
 	}
 	var ip string
 	if len(args) > 0 {
-		c, err := cage.Find(g, args[0])
+		ctx := context.Background()
+		e, err := resolve(ctx, g)
+		if err != nil {
+			return err
+		}
+		c, err := cage.Find(ctx, e.b, args[0])
 		if err != nil {
 			return err
 		}
@@ -979,23 +1144,37 @@ func cmdDoctor(args []string) error {
 	if len(args) > 0 {
 		name = args[0]
 	}
-	pl, ip, err := prepare(g, name, "")
+	ctx := context.Background()
+	e, err := resolve(ctx, g)
 	if err != nil {
 		return err
 	}
-	env := append([]string{
-		"ZOO_MASKS=" + strings.Join(pl.Masks, "\n"),
-		"ZOO_READONLY=" + strings.Join(pl.ReadOnly, "\n"),
-		"HOME=/home/agent",
-	}, cage.ProxyEnv(ip)...)
-	execArgs := []string{"exec", "-u", "agent", "-w", pl.Root}
-	for _, e := range env {
-		execArgs = append(execArgs, "-e", e)
+	pl, ip, err := prepare(ctx, e, name, "")
+	if err != nil {
+		return err
 	}
-	execArgs = append(execArgs, pl.ID, "/usr/local/bin/zoo-doctor")
-	out, runErr := ctr.Run(execArgs...)
+	var outb bytes.Buffer
+	code, runErr := e.b.Exec(ctx, backend.ExecSpec{
+		ID: pl.ID, User: "agent", Workdir: pl.Root, NoStdin: true,
+		Cmd: []string{"/usr/local/bin/zoo-doctor"},
+		Env: append([]string{
+			"ZOO_MASKS=" + strings.Join(pl.Masks, "\n"),
+			"ZOO_READONLY=" + strings.Join(pl.ReadOnly, "\n"),
+			"ZOO_PIN=" + strings.Join(pl.Pin, "\n"),
+			"ZOO_KEEPER=" + ip,
+			"ZOO_DASH_PORT=" + strconv.Itoa(g.Port),
+			"ZOO_HOST_GATEWAY_EXPECTED=" + strconv.FormatBool(e.info.Caps.HostGatewayReachable),
+			"HOME=/home/agent",
+		}, cage.ProxyEnv(ip)...),
+		Stdout: &outb, Stderr: &outb,
+	})
+	out := outb.String()
+	if runErr == nil && code != 0 && out == "" {
+		runErr = fmt.Errorf("zoo-doctor exited %d", code)
+	}
 
-	fmt.Printf("zoo doctor · cage %s · %s\n\n", pl.Name, pl.Root)
+	fmt.Printf("zoo doctor · cage %s · %s\n", pl.Name, pl.Root)
+	fmt.Printf("backend %s · isolation %s%s\n\n", e.b.Name(), e.info.Caps.Isolation, detailSuffix(e.info))
 	fails := 0
 	color := isTerminal(os.Stdout)
 	paint := func(code, s string) string {
@@ -1022,6 +1201,11 @@ func cmdDoctor(args []string) error {
 		}
 	}
 	// Host-side checks.
+	if !e.info.Caps.Isolation.AtLeast(e.floor) {
+		fmt.Println(paint("33", "  ! ") + fmt.Sprintf("isolation: %s is below your floor (%s)", e.info.Caps.Isolation, e.floor))
+	} else {
+		fmt.Println(paint("32", "  ✓ ") + fmt.Sprintf("isolation: %s (floor %s)", e.info.Caps.Isolation, e.floor))
+	}
 	if g.Port > 0 {
 		fmt.Println(paint("32", "  ✓ ") + fmt.Sprintf("dashboard: bound to 127.0.0.1:%d only", g.Port))
 	}
@@ -1045,8 +1229,13 @@ func cmdBuild(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !ctr.Installed() {
-		return errors.New("Apple's `container` CLI isn't installed")
+	ctx := context.Background()
+	e, err := resolve(ctx, g)
+	if err != nil {
+		return err
+	}
+	if !e.info.Ready() {
+		return fmt.Errorf("%s backend isn't ready: %s", e.b.Name(), e.info.Hint)
 	}
 	which := []string{"keeper", "cage"}
 	if len(args) > 0 {
@@ -1055,11 +1244,11 @@ func cmdBuild(args []string) error {
 	for _, w := range which {
 		switch w {
 		case "keeper":
-			if err := buildImage("keeper", g.KeeperImage); err != nil {
+			if err := buildImage(ctx, e.b, "keeper", g.KeeperImage); err != nil {
 				return err
 			}
 		case "cage":
-			if err := buildImage("cage", g.CageImage); err != nil {
+			if err := buildImage(ctx, e.b, "cage", g.CageImage); err != nil {
 				return err
 			}
 			say("rebuilt the cage image; existing cages keep the old one until `zoo reset <cage>`")
