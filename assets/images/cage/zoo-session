@@ -1,0 +1,21 @@
+#!/bin/bash
+# zoo-session: wraps every agent session. Today it gives the session an SSH
+# agent when the cage holds an ssh-agent grant: a private socket relayed to
+# the keeper's gate (ZOO_SSH_AGENT=host:port), which only answers granted
+# cages and filters keys and destinations on the host.
+set -u
+if [ -n "${ZOO_SSH_AGENT:-}" ] && command -v socat >/dev/null; then
+  dir=$(mktemp -d /tmp/zoo-agent.XXXXXX)
+  sock="$dir/agent.sock"
+  socat "UNIX-LISTEN:$sock,fork,umask=077" "TCP:$ZOO_SSH_AGENT" 2>/dev/null &
+  relay=$!
+  for _ in $(seq 1 50); do [ -S "$sock" ] && break; sleep 0.05; done
+  export SSH_AUTH_SOCK="$sock"
+  unset ZOO_SSH_AGENT
+  "$@"
+  rc=$?
+  kill "$relay" 2>/dev/null
+  rm -rf "$dir"
+  exit $rc
+fi
+exec "$@"

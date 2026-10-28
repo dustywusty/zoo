@@ -1,0 +1,840 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>zoo</title>
+<style>
+:root {
+  --bg: #fafafa; --surface: #ffffff; --raise: #f4f4f5; --ink: #18181b; --ink2: #52525b; --muted: #8e8e96;
+  --line: #ececee; --line2: #e0e0e4; --track: #ececee;
+  --accent: #4353d6; --accent-soft: #eef0fd; --on-accent: #ffffff;
+  --red: #cf3f36; --red-soft: #fdf0ef; --amber: #a86a0c; --amber-soft: #fcf4e6; --green: #23935f;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --row: 36px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d0d0f; --surface: #141416; --raise: #1c1c1f; --ink: #ececef; --ink2: #b4b4bb; --muted: #7c7c85;
+    --line: #222226; --line2: #2c2c31; --track: #26262a;
+    --accent: #8c96ff; --accent-soft: #1b1d33; --on-accent: #0d0d0f;
+    --red: #f0736b; --red-soft: #2a1716; --amber: #e2a94e; --amber-soft: #2a2114; --green: #4cc38a;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+.mono { font-family: var(--mono); font-size: 0.92em; }
+.muted { color: var(--muted); }
+.num { font-variant-numeric: tabular-nums; }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+/* header */
+header { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: saturate(1.4) blur(10px); -webkit-backdrop-filter: saturate(1.4) blur(10px); border-bottom: 1px solid var(--line); }
+.bar-in { max-width: 1240px; margin: 0 auto; padding: 0 32px; height: 56px; display: flex; align-items: center; gap: 22px; }
+.brand { font-weight: 650; font-size: 16px; letter-spacing: -0.02em; }
+.meta { display: flex; align-items: center; gap: 18px; font-size: 13px; color: var(--ink2); min-width: 0; white-space: nowrap; }
+.meta > span { display: inline-flex; align-items: center; gap: 7px; }
+.stats { margin-left: auto; display: flex; gap: 22px; font-size: 13px; color: var(--muted); white-space: nowrap; }
+.stats b { color: var(--ink); font-weight: 600; margin-right: 5px; font-variant-numeric: tabular-nums; }
+.stats .hot b { color: var(--red); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; display: inline-block; }
+.dot.ok { background: var(--green); }
+.dot.bad { background: var(--red); }
+.dot.warn { background: var(--amber); }
+.dot.idle { background: var(--line2); }
+
+main { max-width: 1240px; margin: 0 auto; padding: 28px 32px 96px; }
+section { margin-top: 44px; }
+section:first-child { margin-top: 0; }
+.sec-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px; }
+h2 { font-size: 13px; font-weight: 600; margin: 0; color: var(--ink); letter-spacing: -0.005em; }
+.sec-head .muted { font-size: 13px; }
+.sec-head .right { margin-left: auto; font-size: 12.5px; color: var(--muted); }
+.err { background: var(--red-soft); color: var(--red); padding: 12px 16px; border-radius: 10px; margin-bottom: 24px; font-size: 13px; display: none; }
+
+/* buttons */
+.btn { font-size: 12.5px; line-height: 1; padding: 7px 11px; border-radius: 7px; border: 1px solid var(--line2); background: var(--surface); color: var(--ink); cursor: pointer; white-space: nowrap; }
+.btn:hover { background: var(--raise); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { filter: brightness(1.07); }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+.btn.ghost:hover { color: var(--ink); background: var(--raise); }
+.btn.ghost.danger:hover { color: var(--red); background: var(--red-soft); }
+.btn.sm { padding: 5px 9px; font-size: 12px; }
+.btn.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+
+/* approvals */
+.approvals { display: flex; flex-direction: column; margin-bottom: 40px; border-radius: 12px; background: var(--accent-soft); padding: 0 16px 0 18px; }
+.approval { display: flex; align-items: center; gap: 16px; padding: 14px 0; }
+.approval + .approval { border-top: 1px solid color-mix(in srgb, var(--accent) 14%, transparent); }
+.approval .what { flex: 1; min-width: 0; }
+.approval .pdot { background: var(--accent); }
+.approval .line1 { font-size: 14px; }
+.approval .line2 { font-size: 12px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.approval b { font-weight: 600; }
+.approval .exp { font-size: 12.5px; color: var(--ink2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.approval .exp.soon { color: var(--amber); }
+.approval .acts { display: flex; gap: 6px; }
+
+/* cages */
+.cages { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+.cage { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px 16px; display: flex; flex-direction: column; min-width: 0; }
+.cage.stopped { background: transparent; }
+.cage.stopped .cage-name { color: var(--ink2); }
+.cage-top { display: flex; align-items: center; gap: 9px; min-height: 28px; }
+.cage-name { font-weight: 600; font-size: 15px; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cage-top .btn { margin-left: auto; margin-right: -8px; }
+.cage-path { color: var(--muted); font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; margin-top: 1px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; line-height: 18px; padding: 1px 8px; border-radius: 6px; background: var(--raise); color: var(--ink2); white-space: nowrap; }
+.chip.warn { background: var(--amber-soft); color: var(--amber); font-weight: 550; }
+.chip .mono { font-size: 11px; }
+.meters { margin-top: 18px; display: flex; flex-direction: column; gap: 11px; }
+.meter-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; color: var(--muted); }
+.meter-row span:last-child { color: var(--ink); font-variant-numeric: tabular-nums; }
+.track { height: 3px; background: var(--track); border-radius: 2px; overflow: hidden; margin-top: 6px; }
+.track > i { display: block; height: 100%; background: var(--ink2); border-radius: 2px; transition: width .6s ease; }
+.track > i.hot { background: var(--amber); }
+.track > i.max { background: var(--red); }
+.stopped-note { margin-top: 18px; font-size: 12.5px; color: var(--muted); }
+.cage-sub { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; font-size: 12.5px; }
+.kv { display: flex; align-items: center; gap: 10px; min-height: 24px; }
+.kv > .k { width: 64px; flex: none; color: var(--muted); }
+.kv > .v { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; color: var(--ink2); }
+.sess { color: var(--ink); }
+.sess + .sess::before { content: "·"; color: var(--muted); margin: 0 6px 0 0; }
+.sess i { font-style: normal; color: var(--muted); margin-left: 4px; }
+.grant { display: inline-flex; align-items: center; font-family: var(--mono); font-size: 11.5px; line-height: 20px; padding: 0 2px 0 8px; border-radius: 6px; background: var(--raise); color: var(--ink); }
+.grant button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 6px; font-size: 13px; line-height: 20px; border-radius: 5px; }
+.grant button:hover { color: var(--red); }
+.grant.down { color: var(--muted); }
+.add-wrap { position: relative; }
+.add { border: 1px dashed var(--line2); background: none; color: var(--muted); cursor: pointer; border-radius: 6px; font-size: 12px; line-height: 18px; padding: 0 8px; }
+.add:hover { color: var(--ink); border-color: var(--muted); }
+.menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 6; min-width: 220px; background: var(--surface); border: 1px solid var(--line2); border-radius: 10px; padding: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.08); }
+.menu button { display: flex; width: 100%; align-items: baseline; gap: 10px; border: 0; background: none; text-align: left; padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 12.5px; }
+.menu button:hover, .menu button:focus-visible { background: var(--raise); outline: none; }
+.menu button .mono { color: var(--ink); }
+.menu button .muted { margin-left: auto; font-size: 11.5px; }
+.menu .none { padding: 7px 10px; color: var(--muted); font-size: 12.5px; }
+.counts { margin-top: 14px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.counts b { font-weight: 500; color: var(--ink2); }
+.counts .red b, .counts .red { color: var(--red); }
+.empty { color: var(--muted); padding: 28px; border: 1px dashed var(--line2); border-radius: 14px; text-align: center; font-size: 13px; }
+code { font-family: var(--mono); font-size: 12px; background: var(--raise); padding: 2px 6px; border-radius: 5px; color: var(--ink); }
+
+/* services + alerts */
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0 48px; margin-top: 44px; }
+.pair > section { margin-top: 0; }
+.pair.single { grid-template-columns: 1fr; }
+.list { display: flex; flex-direction: column; }
+.li { display: grid; align-items: baseline; gap: 4px 14px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 13px; min-width: 0; }
+.li:last-child { border-bottom: 1px solid var(--line); }
+.svc { grid-template-columns: 10px 112px minmax(0, 1fr) auto; }
+.svc .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.svc .dot { align-self: center; }
+.svc .name { font-family: var(--mono); font-size: 12.5px; font-weight: 550; }
+.svc .tgt { color: var(--ink2); font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.svc .tgt .muted { margin-left: 8px; font-family: var(--sans); font-size: 12px; }
+.svc .who { color: var(--muted); font-size: 12px; text-align: right; white-space: nowrap; }
+.svc .note { grid-column: 2 / -1; color: var(--muted); font-size: 12px; margin-top: -2px; }
+.svc .note.bad { color: var(--red); }
+.al { grid-template-columns: 10px 1fr auto; }
+.al .dot { align-self: center; }
+.al .t { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.al .b { grid-column: 2 / -1; color: var(--muted); font-size: 12.5px; margin-top: -2px; }
+.al time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.more { margin-top: 8px; }
+
+/* activity */
+.filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.search { flex: 1; min-width: 240px; position: relative; }
+.search input { width: 100%; font-size: 13px; padding: 8px 12px 8px 12px; border: 1px solid var(--line2); border-radius: 8px; background: var(--surface); outline: none; }
+.search input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.search input::placeholder { color: var(--muted); }
+.search kbd { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); pointer-events: none; }
+.search input:focus + kbd, .search input:not(:placeholder-shown) + kbd { display: none; }
+kbd { font-family: var(--mono); font-size: 11px; line-height: 16px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line2); color: var(--muted); background: var(--surface); }
+.select { position: relative; display: inline-flex; }
+.select select { appearance: none; -webkit-appearance: none; font-size: 13px; padding: 8px 30px 8px 12px; border: 1px solid var(--line2); border-radius: 8px; background: var(--surface); cursor: pointer; max-width: 200px; }
+.select::after { content: ""; position: absolute; right: 13px; top: 50%; width: 5px; height: 5px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
+.seg { display: inline-flex; padding: 2px; border-radius: 8px; background: var(--raise); }
+.seg button { border: 0; background: none; font-size: 12.5px; padding: 6px 11px; border-radius: 6px; color: var(--ink2); cursor: pointer; white-space: nowrap; }
+.seg button:hover { color: var(--ink); }
+.seg button.on { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line2); }
+.feed-wrap { border-top: 1px solid var(--line); }
+.cols { display: grid; grid-template-columns: 76px 128px 80px minmax(0, 1fr) 76px 68px 68px 70px 68px; column-gap: 14px; align-items: center; padding: 0 10px; }
+.thead { height: 34px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); }
+.r { text-align: right; }
+.feed { position: relative; height: min(68vh, 760px); overflow-y: auto; overscroll-behavior: contain; }
+.feed-in { position: relative; }
+.rows { position: absolute; left: 0; right: 0; top: 0; will-change: transform; }
+.row { height: var(--row); font-size: 13px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.row > * { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.row:hover { background: var(--raise); }
+.row.sel { background: var(--accent-soft); }
+.row.fresh { animation: fresh 1.6s ease-out; }
+@keyframes fresh { from { background: var(--accent-soft); } }
+.c-time { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.c-cage { color: var(--ink2); }
+.c-meth { font-family: var(--mono); font-size: 11.5px; color: var(--muted); letter-spacing: .02em; }
+.c-dest { font-family: var(--mono); font-size: 12.5px; }
+.c-dest .p, .c-dest .s { color: var(--muted); }
+.c-dest .svc-n { font-family: var(--sans); font-weight: 550; font-size: 13px; margin-right: 8px; }
+.c-dest .why { font-family: var(--sans); color: var(--red); font-size: 12px; margin-left: 10px; }
+.tag { font-family: var(--sans); font-size: 11px; font-weight: 550; margin-left: 8px; padding: 1px 6px; border-radius: 5px; }
+.tag.new { color: var(--accent); background: var(--accent-soft); }
+.tag.learn, .tag.unl { color: var(--amber); background: var(--amber-soft); }
+.c-v { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.c-v.no { color: var(--red); font-weight: 550; }
+.c-n { text-align: right; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.c-act { text-align: right; overflow: visible !important; }
+.row .btn.sm { padding: 4px 8px; font-size: 11.5px; }
+@media (hover: hover) { .row .c-act .btn { opacity: 0; transition: opacity .12s; } .row:hover .c-act .btn, .row.sel .c-act .btn, .row .c-act .btn:focus-visible { opacity: 1; } }
+.row.denied .c-dest { color: var(--ink); }
+.feed-empty { padding: 56px 0; text-align: center; color: var(--muted); font-size: 13px; }
+.foot { display: flex; gap: 18px; margin-top: 12px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+.foot kbd { margin-right: 4px; }
+
+/* toast */
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 20px); opacity: 0; background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 10px; font-size: 13px; transition: opacity .2s, transform .2s; pointer-events: none; z-index: 10; max-width: calc(100vw - 32px); }
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.bad { background: var(--red); color: #fff; }
+
+@media (max-width: 1100px) {
+  .cols { grid-template-columns: 70px 110px 72px minmax(0, 1fr) 70px 64px 64px; }
+  .c-dur, .c-act, .thead > :nth-child(8), .thead > :nth-child(9) { display: none; }
+}
+@media (max-width: 860px) {
+  .pair { grid-template-columns: 1fr; }
+  .pair > section + section { margin-top: 44px; }
+  .meta .bk .muted:first-child { display: none; }
+}
+@media (max-width: 640px) {
+  :root { --row: 56px; }
+  .bar-in { padding: 10px 18px; gap: 4px 14px; height: auto; flex-wrap: wrap; }
+  .meta { gap: 12px; font-size: 12.5px; }
+  .meta .kp { display: none; }
+  .stats { gap: 14px; font-size: 12px; margin-left: 0; flex-basis: 100%; }
+  .stats .lbl-long { display: none; }
+  main { padding: 20px 18px 80px; }
+  .cages { grid-template-columns: 1fr; }
+  .approval { flex-wrap: wrap; gap: 10px 12px; }
+  .approval .what { flex-basis: 100%; }
+  .approval .pdot { display: none; }
+  .svc { grid-template-columns: 10px minmax(0, 1fr) auto; }
+  .svc .tgt { grid-column: 2 / -1; grid-row: 2; }
+  .svc .note { grid-row: 3; }
+  .approval .acts { margin-left: auto; }
+  .thead { display: none; }
+  .cols { grid-template-columns: 64px minmax(0, 1fr) auto; grid-template-rows: 22px 20px; column-gap: 10px; row-gap: 0; padding: 8px 4px; align-content: center; }
+  .row { height: var(--row); }
+  .row .c-time { grid-row: 1; grid-column: 1; }
+  .row .c-cage { grid-row: 1; grid-column: 2; }
+  .row .c-meth { grid-row: 2; grid-column: 1; }
+  .row .c-dest { grid-row: 2; grid-column: 2 / 4; }
+  .row .c-v { grid-row: 1; grid-column: 3; text-align: right; }
+  .row .c-n, .row .c-act { display: none; }
+  .filters .search { flex-basis: 100%; }
+  .search kbd { display: none; }
+  .foot { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar-in">
+    <div class="brand">zoo</div>
+    <div class="meta">
+      <span class="bk" id="backend"></span>
+      <span class="kp" id="keeper"><i class="dot idle"></i>keeper</span>
+      <span id="live"><i class="dot idle"></i>connecting</span>
+    </div>
+    <div class="stats">
+      <span><b id="s-cages">0</b>running</span>
+      <span><b id="s-rpm">0</b>req/min</span>
+      <span id="s-denied-w"><b id="s-denied">0</b>denied<span class="lbl-long"> 1h</span></span>
+    </div>
+  </div>
+</header>
+<main>
+  <div class="err" id="err"></div>
+  <div class="approvals" id="approvals" hidden></div>
+
+  <section>
+    <div class="sec-head"><h2>Cages</h2><span class="muted" id="cage-count"></span></div>
+    <div class="cages" id="cages"></div>
+  </section>
+
+  <div class="pair" id="pair">
+    <section id="svc-sec" hidden>
+      <div class="sec-head"><h2>Services</h2><span class="muted" id="svc-count"></span></div>
+      <div class="list" id="services"></div>
+    </section>
+    <section id="al-sec" hidden>
+      <div class="sec-head"><h2>Alerts</h2><span class="muted" id="al-count"></span></div>
+      <div class="list" id="alerts"></div>
+      <button class="btn ghost sm more" id="al-more" hidden></button>
+    </section>
+  </div>
+
+  <section>
+    <div class="sec-head"><h2>Activity</h2><span class="muted">everything that left a cage</span><span class="right" id="count"></span></div>
+    <div class="filters">
+      <div class="search"><input id="q" type="search" placeholder="Search hosts, services, keys, cages" autocomplete="off" spellcheck="false" aria-label="Search activity"><kbd>/</kbd></div>
+      <span class="select"><select id="f-cage" aria-label="Cage"><option value="">All cages</option></select></span>
+      <div class="seg" id="f-verdict" role="group" aria-label="Verdict">
+        <button data-v="" class="on">All</button><button data-v="allowed">Allowed</button><button data-v="denied">Denied</button><button data-v="new">New hosts</button>
+      </div>
+      <button class="btn" id="pause">Pause</button>
+    </div>
+    <div class="feed-wrap">
+      <div class="cols thead"><span>Time</span><span>Cage</span><span>Kind</span><span>Destination</span><span>Verdict</span><span class="r">Out</span><span class="r">In</span><span class="r">Duration</span><span></span></div>
+      <div class="feed" id="feed"><div class="feed-in" id="feed-in"><div class="rows" id="rows"></div></div><div class="feed-empty" id="feed-empty" hidden></div></div>
+    </div>
+    <div class="foot"><span><kbd>/</kbd>search</span><span><kbd>-term</kbd>exclude</span><span><kbd>j</kbd><kbd>k</kbd>move</span><span><kbd>p</kbd>pause</span><span><kbd>esc</kbd>clear</span></div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+"use strict";
+const TOKEN = "__ZOO_TOKEN__";
+const MAX = 5000;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const arr = (v) => Array.isArray(v) ? v : [];
+
+let state = null, alerts = [], showAllAlerts = false;
+let feed = [], keys = new Set(), seq = 0;      // feed: oldest -> newest, normalized
+let paused = false, held = [];
+let approvals = new Map();                      // pending approvals by id
+let openMenu = "";                              // cage name whose grant menu is open
+const filt = { q: "", cage: "", verdict: "" };
+
+// ---- formatting ----
+function bytes(n) {
+  n = Number(n) || 0;
+  if (!n) return "—";
+  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + " GB";
+  if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + " MB";
+  if (n >= 1 << 10) return (n / (1 << 10)).toFixed(n >= 10240 ? 0 : 1) + " KB";
+  return n + " B";
+}
+function memToBytes(s) {
+  const m = /^([\d.]+)\s*([KMGT]?)/i.exec(s || "");
+  if (!m) return 0;
+  return Number(m[1]) * ({ "": 1, K: 1 << 10, M: 1 << 20, G: 1 << 30, T: 2 ** 40 }[m[2].toUpperCase()]);
+}
+function dur(ms) {
+  ms = Number(ms) || 0;
+  if (!ms) return "—";
+  if (ms < 1000) return ms + " ms";
+  if (ms < 60e3) return (ms / 1000).toFixed(1) + " s";
+  return Math.floor(ms / 60e3) + "m " + String(Math.floor(ms / 1000) % 60).padStart(2, "0") + "s";
+}
+const hhmmss = (t) => new Date(t).toLocaleTimeString([], { hour12: false });
+function ago(t) {
+  const s = Math.max(0, (Date.now() - new Date(t)) / 1000);
+  if (s < 60) return Math.floor(s) + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+}
+const shortPath = (p) => (p || "").replace(/^\/(Users|home)\/[^/]+/, "~");
+const shortFp = (f) => (f || "").replace(/^(SHA256:.{8}).+$/, "$1…");
+
+// ---- requests ----
+let toastTimer = null;
+function toast(msg, bad) {
+  const t = $("toast");
+  t.textContent = msg; t.className = "toast show" + (bad ? " bad" : "");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.className = "toast" + (bad ? " bad" : ""), bad ? 5000 : 2200);
+}
+async function send(method, url, body) {
+  const r = await fetch(url, { method, headers: { "Content-Type": "application/json", "X-Zoo-Token": TOKEN }, body: JSON.stringify(body || {}) });
+  const text = await r.text();
+  if (!r.ok) throw new Error(text.trim() || r.status + " " + r.statusText);
+  try { return JSON.parse(text); } catch { return {}; }
+}
+
+// ---- header ----
+function renderHeader() {
+  const b = (state && state.backend) || {};
+  const bk = $("backend");
+  if (b.name) {
+    bk.innerHTML = `${esc(b.name)}${b.detail ? ` <span class="muted">${esc(b.detail)}</span>` : ""} <span class="muted">·</span> ${esc(b.isolation || "?")} isolation`;
+    bk.title = [b.version && "version " + b.version, b.floor && "isolation floor " + b.floor].filter(Boolean).join(" · ");
+  }
+  const k = (state && state.keeper) || {};
+  $("keeper").innerHTML = state ? `<i class="dot ${k.running ? "ok" : "bad"}"></i>keeper${k.running ? (k.ip ? ` <span class="mono muted">${esc(k.ip)}</span>` : "") : " down"}` : `<i class="dot idle"></i>keeper`;
+  const cages = arr(state && state.cages);
+  $("s-cages").textContent = cages.filter(c => c.running).length;
+  const now = Date.now();
+  let rpm = 0, den = 0;
+  for (let i = feed.length - 1; i >= 0; i--) {
+    const e = feed[i], age = now - e.t;
+    if (age > 3600e3) break;
+    if (e.denied) den++;
+    if (e.k === "web" && age < 60e3) rpm++;
+  }
+  $("s-rpm").textContent = rpm;
+  $("s-denied").textContent = den;
+  $("s-denied-w").classList.toggle("hot", den > 0);
+  const err = $("err");
+  err.style.display = state && state.error ? "block" : "none";
+  if (state && state.error) err.textContent = state.error;
+}
+
+// ---- approvals ----
+function setApprovals(list) { approvals = new Map(arr(list).filter(p => p && p.id && !p.resolved).map(p => [String(p.id), p])); renderApprovals(); }
+function renderApprovals() {
+  const now = Date.now();
+  for (const [id, p] of approvals) if (p.expires && new Date(p.expires) < now - 2000) approvals.delete(id);
+  const el = $("approvals");
+  const list = [...approvals.values()].sort((a, b) => new Date(a.expires || 0) - new Date(b.expires || 0));
+  el.hidden = !list.length;
+  el.innerHTML = list.map(p => {
+    const what = p.kind === "ssh-sign" || p.key
+      ? `<b>${esc(p.cage)}</b> wants to use key <b>${esc(p.key || "?")}</b>${p.dest_host ? ` for <b class="mono">${esc(p.dest_host)}</b>` : ""}`
+      : `<b>${esc(p.cage)}</b> wants to use <b>${esc(p.service)}</b>`;
+    const sub = [p.service && esc(p.service), p.fingerprint && `<span class="mono">${esc(shortFp(p.fingerprint))}</span>`].filter(Boolean).join(" · ");
+    return `<div class="approval" data-pid="${esc(p.id)}"><i class="dot pdot"></i>
+      <div class="what"><div class="line1">${what}</div>${sub ? `<div class="line2" title="${esc(p.fingerprint)}">${sub}</div>` : ""}</div>
+      <span class="exp" data-exp="${esc(p.expires || "")}"></span>
+      <div class="acts"><button class="btn ghost" data-decide="${esc(p.id)}" data-allow="0">Deny</button><button class="btn primary" data-decide="${esc(p.id)}" data-allow="1">Allow</button></div></div>`;
+  }).join("");
+  tickApprovals();
+}
+function tickApprovals() {
+  let expired = false;
+  for (const s of document.querySelectorAll("[data-exp]")) {
+    if (!s.dataset.exp) continue;
+    const left = Math.round((new Date(s.dataset.exp) - Date.now()) / 1000);
+    if (left < -2) expired = true;
+    s.textContent = left > 0 ? `expires in ${left}s` : "expired";
+    s.classList.toggle("soon", left <= 10);
+    if (left <= 0) for (const b of s.parentElement.querySelectorAll("[data-decide]")) b.disabled = true;
+  }
+  if (expired) renderApprovals();
+}
+
+// ---- cages ----
+function services() { return arr(state && state.services); }
+function meter(label, value, pct) {
+  const w = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+  const cls = pct >= 90 ? "max" : pct >= 75 ? "hot" : "";
+  return `<div><div class="meter-row"><span>${label}</span><span>${value}</span></div>${pct === false ? "" : `<div class="track"><i class="${cls}" style="width:${w}%"></i></div>`}</div>`;
+}
+function cageMeters(c) {
+  const st = c.stat || {}, have = st.have || {};
+  const cpus = Number(c.cpus) || 1;
+  const cpuPct = have.cpu ? (Number(st.cpu_percent) || 0) / cpus : null;
+  const limit = st.mem_limit || memToBytes(c.memory);
+  const memPct = have.mem && limit ? (st.mem_used / limit) * 100 : null;
+  return [
+    meter(`CPU <span class="muted">· ${cpus} core${cpus > 1 ? "s" : ""}</span>`, cpuPct == null ? "—" : cpuPct.toFixed(0) + "%", cpuPct),
+    meter(`Memory${c.memory ? ` <span class="muted">· ${esc(c.memory)}</span>` : ""}`, memPct == null ? "—" : `${bytes(st.mem_used)} <span class="muted">/ ${bytes(limit)}</span>`, memPct),
+    meter("Network", have.net ? `↓ ${bytes(st.net_rx_rate)}/s <span class="muted">·</span> ↑ ${bytes(st.net_tx_rate)}/s` : "—", false),
+  ];
+}
+function grantsRow(c) {
+  if (!Array.isArray(c.grants) || (!services().length && !c.grants.length)) return "";
+  const svc = new Map(services().map(s => [s.name, s]));
+  const chips = c.grants.map(g => {
+    const s = svc.get(g);
+    const down = s && s.status && s.status !== "ready";
+    return `<span class="grant${down ? " down" : ""}" title="${esc(s ? `${s.kind} · ${s.target}${down ? " · " + s.status : ""}` : "unknown service")}">${esc(g)}<button data-revoke="${esc(g)}" data-cage="${esc(c.name)}" aria-label="Revoke ${esc(g)}">×</button></span>`;
+  }).join("");
+  const avail = services().filter(s => !c.grants.includes(s.name));
+  const menu = openMenu === c.name ? `<div class="menu" role="menu">${avail.length ? avail.map(s => `<button role="menuitem" data-grant="${esc(s.name)}" data-cage="${esc(c.name)}"><span class="mono">${esc(s.name)}</span><span class="muted">${esc(s.kind)}</span></button>`).join("") : `<div class="none">Every service is granted.</div>`}</div>` : "";
+  const add = services().length ? `<span class="add-wrap"><button class="add" data-menu="${esc(c.name)}" aria-haspopup="menu" aria-expanded="${openMenu === c.name}" title="Grant a service">+ grant</button>${menu}</span>` : "";
+  return `<div class="kv"><span class="k">Services</span><span class="v">${chips || (avail.length ? "" : `<span class="muted">none</span>`)}${add}</span></div>`;
+}
+function cageShell(c) {
+  const cnt = c.counts || {};
+  const sessions = arr(c.sessions).map(s => `<span class="sess" title="started ${esc(s.started)}">${esc(s.harness)}<i>${ago(s.started)}</i></span>`).join("");
+  const iso = c.isolation ? (c.weaker_isolation
+    ? `<span class="chip warn" title="Started below the isolation floor (--allow-weaker-isolation)">${esc(c.isolation)} · below floor</span>`
+    : `<span class="chip" title="Isolation level">${esc(c.isolation)}</span>`) : "";
+  return `<div class="cage-top"><i class="dot ${c.running ? "ok" : "idle"}"></i><span class="cage-name">${esc(c.name)}</span>
+      ${c.running ? `<button class="btn ghost sm danger" data-stop="${esc(c.id)}" data-name="${esc(c.name)}">Stop</button>` : ""}</div>
+    <div class="cage-path" title="${esc(c.worktree)}"><bdi>${esc(shortPath(c.worktree))}</bdi></div>
+    <div class="chips">${iso}${c.learn ? `<span class="chip warn" title="Unlisted hosts are allowed and recorded">learn mode</span>` : ""}<span class="chip">${esc(c.size || "custom")}</span></div>
+    ${c.running ? `<div class="meters"></div>` : `<div class="stopped-note">${esc(c.status || "stopped")}</div>`}
+    <div class="cage-sub">
+      ${c.running ? `<div class="kv"><span class="k">Agents</span><span class="v">${sessions || `<span class="muted">none attached</span>`}</span></div>` : ""}
+      ${grantsRow(c)}
+      ${c.network ? `<div class="kv"><span class="k">Network</span><span class="v mono">${esc(c.network)}</span></div>` : ""}
+    </div>
+    <div class="counts"><b>${cnt.requests || 0}</b> requests · <span class="${cnt.denied ? "red" : ""}"><b>${cnt.denied || 0}</b> denied</span> · <b>${cnt.hosts || 0}</b> hosts</div>`;
+}
+function renderCages() {
+  const el = $("cages");
+  const cages = arr(state && state.cages);
+  const running = cages.filter(c => c.running).length;
+  $("cage-count").textContent = cages.length ? `${running} running${cages.length > running ? ` · ${cages.length - running} stopped` : ""}` : "";
+  if (!cages.length) {
+    el.innerHTML = `<div class="empty">No cages yet. In a repo, run <code>zoo run claude</code>.</div>`;
+  } else {
+    // Keyed update: rebuild a card only when its shell changes, so meters animate and menus/focus survive.
+    const seen = new Set();
+    let prev = null;
+    for (const c of cages) {
+      const key = c.id || c.name;
+      seen.add(key);
+      let card = el.querySelector(`.cage[data-key="${CSS.escape(key)}"]`);
+      if (!card) { card = document.createElement("div"); card.dataset.key = key; }
+      const shell = cageShell(c);
+      if (card._shell !== shell) { card.innerHTML = shell; card._shell = shell; }
+      card.className = "cage" + (c.running ? "" : " stopped");
+      const m = card.querySelector(".meters");
+      if (m) {
+        const parts = cageMeters(c);
+        if (m.children.length !== parts.length) m.innerHTML = parts.join("");
+        else parts.forEach((html, i) => {
+          const tmp = document.createElement("div"); tmp.innerHTML = html;
+          const nu = tmp.firstElementChild, old = m.children[i];
+          old.querySelector(".meter-row").innerHTML = nu.querySelector(".meter-row").innerHTML;
+          const oi = old.querySelector(".track > i"), ni = nu.querySelector(".track > i");
+          if (oi && ni) { oi.style.width = ni.style.width; oi.className = ni.className; }
+        });
+      }
+      const want = prev ? prev.nextSibling : el.firstChild;
+      if (want !== card) el.insertBefore(card, want);
+      prev = card;
+    }
+    for (const n of [...el.children]) if (!n.dataset.key || !seen.has(n.dataset.key)) n.remove();
+  }
+  renderCageFilter();
+}
+function renderCageFilter() {
+  const sel = $("f-cage"), cur = sel.value;
+  const names = new Set(arr(state && state.cages).map(c => c.name));
+  for (const e of feed) names.add(e.cage);
+  const list = [...names].filter(Boolean).sort();
+  const key = list.join("\n");
+  if (sel._key === key) return;
+  sel._key = key;
+  sel.innerHTML = `<option value="">All cages</option>` + list.map(n => `<option ${n === cur ? "selected" : ""}>${esc(n)}</option>`).join("");
+}
+
+// ---- services ----
+function renderServices() {
+  const list = services();
+  $("svc-sec").hidden = !list.length;
+  $("svc-count").textContent = list.length ? String(list.length) : "";
+  const users = {};
+  for (const c of arr(state && state.cages)) for (const g of arr(c.grants)) (users[g] = users[g] || []).push(c.name);
+  $("services").innerHTML = list.map(s => {
+    const st = s.status || "";
+    const dot = st === "ready" ? "ok" : st === "down" ? "bad" : "idle";
+    const port = s.port && !String(s.target || "").endsWith(":" + s.port) ? `<span class="muted">port ${esc(s.port)}</span>` : "";
+    const who = users[s.name] || [];
+    const note = s.note || (st && st !== "ready" ? st : "");
+    return `<div class="li svc"><i class="dot ${dot}" title="${esc(st || "unknown")}"></i><span class="name">${esc(s.name)}</span>
+      <span class="tgt" title="${esc(s.target)}">${esc(s.target)}<span class="muted">${esc(s.kind)}</span>${port ? " " + port : ""}</span>
+      <span class="who" title="${esc(who.join(", "))}">${who.length ? esc(who.length > 2 ? `${who.slice(0, 2).join(", ")} +${who.length - 2}` : who.join(", ")) : "no grants"}</span>
+      ${note ? `<span class="note ${st === "down" ? "bad" : ""}">${esc(note)}</span>` : ""}</div>`;
+  }).join("");
+  layoutPair();
+}
+
+// ---- alerts ----
+function renderAlerts() {
+  const n = alerts.length;
+  $("al-sec").hidden = !n;
+  $("al-count").textContent = n ? String(n) : "";
+  const shown = alerts.slice(showAllAlerts ? -100 : -4).reverse();
+  $("alerts").innerHTML = shown.map(a => `<div class="li al"><i class="dot ${a.level === "crit" ? "bad" : "warn"}"></i><span class="t" title="${esc(a.title)}">${esc(a.title)}</span><time title="${esc(a.time)}">${hhmmss(a.time)}</time><span class="b">${a.cage ? esc(a.cage) + " · " : ""}${esc(a.body)}</span></div>`).join("");
+  const more = $("al-more");
+  more.hidden = n <= 4;
+  more.textContent = showAllAlerts ? "Show fewer" : `Show all ${Math.min(n, 100)}`;
+  layoutPair();
+}
+function layoutPair() {
+  const both = !$("svc-sec").hidden && !$("al-sec").hidden;
+  $("pair").classList.toggle("single", !both);
+  $("pair").hidden = $("svc-sec").hidden && $("al-sec").hidden;
+}
+$("al-more").addEventListener("click", () => { showAllAlerts = !showAllAlerts; renderAlerts(); });
+
+// ---- activity feed ----
+// Normalize web requests, service connections and SSH signs into one row shape.
+function norm(k, r) {
+  const t = new Date(r.time).getTime() || Date.now();
+  let e;
+  if (k === "web") {
+    e = { k, id: r.id, t, cage: r.cage, denied: !!r.denied, host: r.host || "", method: r.method || "", r };
+    e.hay = `${r.host} ${r.url} ${r.cage} ${r.method} ${r.status} ${r.squid} ${r.denied ? "denied blocked" : "allowed"} web`;
+  } else if (k === "conn") {
+    e = { k, id: r.id, t, cage: r.cage, denied: r.verdict === "denied", method: "TCP", r };
+    e.hay = `${r.service} ${r.target} ${r.cage} tcp conn ${r.verdict} ${r.reason || ""}`;
+  } else {
+    const op = String(r.op || "sign").toUpperCase();
+    e = { k, id: r.id, t, cage: r.cage, denied: r.verdict === "denied", method: "SSH " + op, r };
+    e.hay = `${r.service} ${r.key} ${r.fingerprint} ${r.dest_host} ${r.cage} ssh ${op.toLowerCase()} ${r.reason || ""} ${r.verdict}`;
+  }
+  e.hay = e.hay.toLowerCase();
+  e.key = k + ":" + r.id;
+  return e;
+}
+function add(items, live) {
+  let n = 0;
+  for (const e of items) {
+    if (e.r.id != null && keys.has(e.key)) continue;
+    keys.add(e.key);
+    e.seq = ++seq; e.live = live;
+    feed.push(e); n++;
+  }
+  if (feed.length > MAX) { feed = feed.slice(feed.length - MAX); keys = new Set(feed.map(e => e.key)); }
+  return n;
+}
+function ingest(k, r) {
+  const e = norm(k, r);
+  if (paused) held.push(e); else add([e], true);
+  scheduleRows();
+}
+function listed(host) {
+  return arr(state && state.allowlist).some(e => e.startsWith(".") ? host === e.slice(1) || host.endsWith(e) : host === e);
+}
+function matches(e, terms) {
+  if (filt.cage && e.cage !== filt.cage) return false;
+  if (filt.verdict === "allowed" && e.denied) return false;
+  if (filt.verdict === "denied" && !e.denied) return false;
+  if (filt.verdict === "new" && !(e.k === "web" && e.r.first_seen)) return false;
+  for (const term of terms) {
+    if (term[0] === "-" ? term.length > 1 && e.hay.includes(term.slice(1)) : !e.hay.includes(term)) return false;
+  }
+  return true;
+}
+
+let view = [], selSeq = 0, flashAfter = 0, topSeq = 0, rowH = 36;
+function rowHTML(e, fresh) {
+  const r = e.r;
+  let dest = "", verdict = "", act = "";
+  if (e.k === "web") {
+    const path = r.method === "CONNECT" ? "" : (() => { try { const u = new URL(r.url); return u.pathname + u.search; } catch { return ""; } })();
+    const onList = listed(e.host);
+    // Only flag what matters: first contact, and allowed traffic that isn't on the allowlist (learned or otherwise).
+    const tags = (r.first_seen ? `<span class="tag new">new</span>` : "") + (!e.denied && !onList ? (r.learn ? `<span class="tag learn" title="Allowed by learn mode">learned</span>` : `<span class="tag unl">not listed</span>`) : "");
+    dest = `${esc(e.host)}${path ? `<span class="p">${esc(path.length > 80 ? path.slice(0, 80) + "…" : path)}</span>` : ""}${tags}`;
+    verdict = e.denied ? "denied" : esc(r.status || "ok");
+    if (!onList && e.host) act = `<button class="btn sm" data-allow-host="${esc(e.host)}">Allow</button>`;
+  } else if (e.k === "conn") {
+    dest = `<span class="svc-n">${esc(r.service)}</span><span class="s">${esc(r.target)}</span>${e.denied && r.reason ? `<span class="why">${esc(r.reason)}</span>` : ""}`;
+    verdict = e.denied ? "denied" : "open";
+    const c = arr(state && state.cages).find(x => x.name === r.cage);
+    if (e.denied && c && Array.isArray(c.grants) && !c.grants.includes(r.service) && services().some(s => s.name === r.service))
+      act = `<button class="btn sm" data-grant="${esc(r.service)}" data-cage="${esc(r.cage)}">Grant</button>`;
+  } else {
+    dest = `<span class="svc-n">${r.key ? "key " + esc(r.key) : esc(r.service)}</span>${r.dest_host ? `<span class="s">→ </span>${esc(r.dest_host)}` : ""}${e.denied && r.reason ? `<span class="why">${esc(r.reason)}</span>` : ""}`;
+    verdict = e.denied ? "denied" : (r.op && r.op !== "sign" ? "ok" : "signed");
+  }
+  const title = e.k === "web" ? r.url : e.k === "conn" ? `${r.service} → ${r.target}${r.reason ? " · " + r.reason : ""}` : `${r.key} ${r.fingerprint || ""} → ${r.dest_host || ""}${r.reason ? " · " + r.reason : ""}`;
+  return `<div class="row cols${e.denied ? " denied" : ""}${fresh ? " fresh" : ""}${e.seq === selSeq ? " sel" : ""}" data-seq="${e.seq}">
+    <span class="c-time" title="${esc(new Date(e.t).toISOString())}">${hhmmss(e.t)}</span><span class="c-cage" title="${esc(e.cage)}">${esc(e.cage)}</span><span class="c-meth">${esc(e.method)}</span>
+    <span class="c-dest" title="${esc(title)}">${dest}</span><span class="c-v${e.denied ? " no" : ""}">${verdict}</span>
+    <span class="c-n">${bytes(r.bytes_out)}</span><span class="c-n">${bytes(r.bytes_in)}</span><span class="c-n c-dur">${e.k === "sign" ? "—" : dur(r.ms)}</span><span class="c-act">${act}</span></div>`;
+}
+function renderRows() {
+  const terms = filt.q.toLowerCase().split(/\s+/).filter(Boolean);
+  const feedEl = $("feed");
+  const oldTop = view.length ? view[0].seq : 0;
+  view = [];
+  for (let i = feed.length - 1; i >= 0; i--) if (matches(feed[i], terms)) view.push(feed[i]);
+  // Keep the reader's place when new rows land above a scrolled list.
+  if (feedEl.scrollTop > 2 && oldTop) {
+    let added = 0;
+    while (added < view.length && view[added].seq > oldTop) added++;
+    if (added) feedEl.scrollTop += added * rowH;
+  }
+  const n = view.length;
+  $("count").textContent = `${n.toLocaleString()} ${n === 1 ? "event" : "events"}${paused ? ` · paused${held.length ? `, ${held.length} waiting` : ""}` : ""}`;
+  const empty = $("feed-empty");
+  empty.hidden = !!n;
+  if (!n) empty.textContent = feed.length ? "Nothing matches these filters." : "No traffic yet. Requests, connections and SSH signs from cages appear here live.";
+  $("feed-in").style.height = n * rowH + "px";
+  paint();
+  flashAfter = topSeq = feed.length ? feed[feed.length - 1].seq : 0;
+}
+function paint() {
+  const feedEl = $("feed");
+  const top = feedEl.scrollTop, h = feedEl.clientHeight || 600;
+  const start = Math.max(0, Math.floor(top / rowH) - 8);
+  const end = Math.min(view.length, Math.ceil((top + h) / rowH) + 8);
+  let html = "";
+  for (let i = start; i < end; i++) html += rowHTML(view[i], view[i].live && view[i].seq > flashAfter);
+  const rows = $("rows");
+  rows.style.transform = `translateY(${start * rowH}px)`;
+  rows.innerHTML = html;
+}
+let painting = false;
+$("feed").addEventListener("scroll", () => {
+  if (painting) return;
+  painting = true;
+  requestAnimationFrame(() => { painting = false; flashAfter = topSeq; paint(); });
+}, { passive: true });
+function measureRow() {
+  rowH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--row")) || 36;
+}
+window.addEventListener("resize", () => { const o = rowH; measureRow(); if (o !== rowH) renderRows(); else paint(); });
+
+$("q").addEventListener("input", (e) => { filt.q = e.target.value.trim(); $("feed").scrollTop = 0; renderRows(); });
+$("f-cage").addEventListener("change", (e) => { filt.cage = e.target.value; $("feed").scrollTop = 0; renderRows(); });
+$("f-verdict").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  filt.verdict = b.dataset.v;
+  for (const x of $("f-verdict").children) x.classList.toggle("on", x === b);
+  $("feed").scrollTop = 0;
+  renderRows();
+});
+function togglePause() {
+  paused = !paused;
+  $("pause").textContent = paused ? "Resume" : "Pause";
+  $("pause").classList.toggle("on", paused);
+  if (!paused) { add(held, true); held = []; }
+  renderRows(); renderHeader();
+}
+$("pause").addEventListener("click", togglePause);
+function moveSel(d) {
+  if (!view.length) return;
+  let i = view.findIndex(e => e.seq === selSeq);
+  i = i < 0 ? 0 : Math.max(0, Math.min(view.length - 1, i + d));
+  selSeq = view[i].seq;
+  const f = $("feed"), y = i * rowH;
+  if (y < f.scrollTop) f.scrollTop = y;
+  else if (y + rowH > f.scrollTop + f.clientHeight) f.scrollTop = y + rowH - f.clientHeight;
+  paint();
+}
+document.addEventListener("keydown", (e) => {
+  const inField = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement && document.activeElement.tagName);
+  if (e.key === "Escape") {
+    if (openMenu) { openMenu = ""; renderCages(); return; }
+    if (document.activeElement === $("q")) { $("q").value = ""; filt.q = ""; renderRows(); $("q").blur(); }
+    else if (selSeq) { selSeq = 0; paint(); }
+    return;
+  }
+  if (inField || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "/") { e.preventDefault(); $("q").focus(); }
+  else if (e.key === "p") togglePause();
+  else if (e.key === "j") moveSel(1);
+  else if (e.key === "k") moveSel(-1);
+});
+
+// ---- actions ----
+function cageByName(n) { return arr(state && state.cages).find(c => c.name === n); }
+document.addEventListener("click", async (ev) => {
+  const t = ev.target;
+  const menuBtn = t.closest("[data-menu]");
+  if (menuBtn) { openMenu = openMenu === menuBtn.dataset.menu ? "" : menuBtn.dataset.menu; renderCages(); return; }
+  if (openMenu && !t.closest(".menu")) { openMenu = ""; renderCages(); }
+
+  const stop = t.closest("[data-stop]");
+  if (stop) {
+    if (!confirm(`Stop ${stop.dataset.name}? The worktree is untouched.`)) return;
+    stop.disabled = true;
+    try { await send("POST", `/api/cages/${encodeURIComponent(stop.dataset.stop)}/stop`); toast(`Stopping ${stop.dataset.name}`); }
+    catch (e) { toast(e.message, true); stop.disabled = false; }
+    return;
+  }
+  const allow = t.closest("[data-allow-host]");
+  if (allow) {
+    const host = allow.dataset.allowHost;
+    if (!confirm(`Allow ${host} for every cage?`)) return;
+    allow.disabled = true;
+    try { await send("POST", "/api/allow", { host }); if (state) state.allowlist = [...arr(state.allowlist), host]; toast(`${host} allowed`); renderRows(); }
+    catch (e) { toast(e.message, true); allow.disabled = false; }
+    return;
+  }
+  const grant = t.closest("[data-grant]");
+  if (grant) {
+    const cage = grant.dataset.cage, service = grant.dataset.grant;
+    openMenu = "";
+    try {
+      await send("POST", "/api/grants", { cage, service });
+      const c = cageByName(cage);
+      if (c && Array.isArray(c.grants) && !c.grants.includes(service)) c.grants.push(service);
+      toast(`${service} granted to ${cage}`);
+    } catch (e) { toast(e.message, true); }
+    renderCages(); renderServices(); renderRows();
+    return;
+  }
+  const revoke = t.closest("[data-revoke]");
+  if (revoke) {
+    const cage = revoke.dataset.cage, service = revoke.dataset.revoke;
+    if (!confirm(`Revoke ${service} from ${cage}? Open connections may drop.`)) return;
+    try {
+      await send("DELETE", "/api/grants", { cage, service });
+      const c = cageByName(cage);
+      if (c && Array.isArray(c.grants)) c.grants = c.grants.filter(g => g !== service);
+      toast(`${service} revoked from ${cage}`);
+    } catch (e) { toast(e.message, true); }
+    renderCages(); renderServices();
+    return;
+  }
+  const decide = t.closest("[data-decide]");
+  if (decide) {
+    const id = decide.dataset.decide, allowIt = decide.dataset.allow === "1";
+    for (const b of decide.parentElement.querySelectorAll("button")) b.disabled = true;
+    try { await send("POST", `/api/pending/${encodeURIComponent(id)}`, { allow: allowIt }); approvals.delete(id); renderApprovals(); toast(allowIt ? "Allowed once" : "Denied"); }
+    catch (e) { toast(e.message, true); for (const b of decide.parentElement.querySelectorAll("button")) b.disabled = false; }
+    return;
+  }
+  const row = t.closest(".row[data-seq]");
+  if (row && !t.closest("button")) { selSeq = Number(row.dataset.seq); paint(); }
+});
+
+// ---- data ----
+let rowTimer = null;
+function scheduleRows() { if (!rowTimer) rowTimer = setTimeout(() => { rowTimer = null; renderRows(); renderHeader(); }, 150); }
+
+function applyState(s) {
+  state = s || {};
+  if (Array.isArray(state.pending)) setApprovals(state.pending);
+  renderCages(); renderServices(); renderHeader();
+}
+async function load() {
+  const r = await fetch("/api/state");
+  if (!r.ok) throw new Error(r.status + " " + r.statusText);
+  const d = await r.json();
+  alerts = arr(d.alerts);
+  const items = [
+    ...arr(d.events).map(e => norm("web", e)),
+    ...arr(d.conns).map(e => norm("conn", e)),
+    ...arr(d.signs).map(e => norm("sign", e)),
+  ].sort((a, b) => a.t - b.t);
+  add(items, false);
+  if (Array.isArray(d.pending)) setApprovals(d.pending);
+  applyState(d.state);
+  renderAlerts(); renderRows();
+}
+function connect() {
+  const es = new EventSource("/api/stream");
+  const live = (cls, txt) => $("live").innerHTML = `<i class="dot ${cls}"></i>${txt}`;
+  es.onopen = () => live("ok", "live");
+  es.onerror = () => live("warn", "reconnecting");
+  es.addEventListener("state", (m) => applyState(JSON.parse(m.data)));
+  es.addEventListener("net", (m) => ingest("web", JSON.parse(m.data)));
+  es.addEventListener("conn", (m) => ingest("conn", JSON.parse(m.data)));
+  es.addEventListener("sign", (m) => ingest("sign", JSON.parse(m.data)));
+  es.addEventListener("pending", (m) => {
+    const p = JSON.parse(m.data);
+    if (!p || p.id == null) return;
+    if (p.resolved) approvals.delete(String(p.id)); else approvals.set(String(p.id), p);
+    renderApprovals();
+  });
+  es.addEventListener("alert", (m) => { alerts.push(JSON.parse(m.data)); if (alerts.length > 500) alerts = alerts.slice(-500); renderAlerts(); });
+}
+measureRow();
+renderRows();
+load().catch(e => { const el = $("err"); el.style.display = "block"; el.textContent = "Can't reach the zoo daemon: " + e.message; });
+connect();
+setInterval(renderHeader, 5000);
+setInterval(tickApprovals, 1000);
+</script>
+</body>
+</html>

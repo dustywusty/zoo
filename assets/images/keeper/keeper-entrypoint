@@ -1,0 +1,31 @@
+#!/bin/sh
+# Config and allowlist come from the host (~/.zoo/keeper/etc), mounted at /etc/zoo.
+# The access log goes to the host (~/.zoo/keeper/log), mounted at /var/log/zoo,
+# where the zoo daemon tails it.
+#
+# squid must not be PID 1: `squid -k reconfigure` (how zoo applies allowlist
+# and learn-mode changes) refuses a pid file that says 1. So this shell stays
+# PID 1, forwards stop signals, and exits when squid does.
+set -eu
+mkdir -p /var/log/zoo /var/spool/squid /run/squid
+chmod 0777 /var/log/zoo 2>/dev/null || true
+chown -R proxy:proxy /var/spool/squid /run/squid 2>/dev/null || true
+# A pid file left by the previous run makes squid refuse to start when its
+# old PID is now in use (e.g. by zoo-gate) after a restart.
+rm -f /run/squid/squid.pid
+squid -k parse -f /etc/zoo/squid.conf
+
+# zoo-gate forwards granted services. It runs as squid's unprivileged user;
+# ports below 1024 are shifted up by the host, so it needs no capabilities.
+# It watches gate.json (written by the host) and picks up changes.
+setpriv --reuid=proxy --regid=proxy --clear-groups --no-new-privs \
+  /usr/local/bin/zoo-gate -config /etc/zoo/gate.json -log /var/log/zoo/gate.log &
+gate=$!
+
+squid -N -f /etc/zoo/squid.conf &
+pid=$!
+trap 'kill -TERM "$pid" "$gate" 2>/dev/null' TERM INT
+# wait returns early when a trapped signal arrives; wait again for the exit.
+wait "$pid" || true
+wait "$pid" 2>/dev/null || true
+kill -TERM "$gate" 2>/dev/null || true

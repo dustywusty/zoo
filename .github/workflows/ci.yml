@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - run: go test ./...
+      - run: shellcheck -s bash assets/images/cage/zoo-doctor && shellcheck -s sh assets/images/cage/zoo-init assets/images/keeper/keeper-entrypoint
+
+  # M1 gate: docker backend, escape suite inside a real cage.
+  docker-escape-suite:
+    runs-on: ubuntu-latest
+    env:
+      ZOO_HOME: ${{ github.workspace }}/.zoo-ci
+      ZOO_KEYS_FILE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - run: go build -o zoo ./cmd/zoo
+      - name: zoo up
+        run: ./zoo up --backend docker --isolation-floor container
+      - name: test repo (main checkout + linked worktree, with secrets)
+        run: |
+          git init -q /tmp/repo && cd /tmp/repo
+          echo SECRET=1 > .env && echo hi > README.md
+          git add README.md && git -c user.name=ci -c user.email=ci@ci commit -qm init
+          git worktree add -q /tmp/repo-wt && echo SECRET=2 > /tmp/repo-wt/.env
+      - name: escape suite (main checkout)
+        working-directory: /tmp/repo
+        run: $GITHUB_WORKSPACE/zoo doctor
+      - name: escape suite (linked worktree)
+        working-directory: /tmp/repo-wt
+        run: $GITHUB_WORKSPACE/zoo doctor
+      - name: secrets read empty inside, intact outside
+        working-directory: /tmp/repo
+        run: |
+          test -z "$($GITHUB_WORKSPACE/zoo run shell -- -c 'cat .env')"
+          grep -q SECRET=1 .env
+      - name: floor refuses container isolation by default
+        working-directory: /tmp/repo
+        run: |
+          if $GITHUB_WORKSPACE/zoo --isolation-floor microvm run shell -- -c true; then exit 1; fi
+      - if: always()
+        run: |
+          ./zoo ls || true
+          docker logs zoo-keeper 2>&1 | tail -20 || true
+          tail -50 "$ZOO_HOME/keeper/log/access.log" || true

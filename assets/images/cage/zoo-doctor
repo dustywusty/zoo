@@ -1,0 +1,167 @@
+#!/bin/bash
+# zoo-doctor: run inside a cage as the agent user. Proves the walls hold.
+# Prints one line per check: PASS|FAIL|WARN <check>: <detail>
+set -u
+
+pass() { echo "PASS $1: $2"; }
+fail() { echo "FAIL $1: $2"; }
+warn() { echo "WARN $1: $2"; }
+
+# 1. No direct route to the internet (IP literal, so DNS doesn't matter).
+if curl --noproxy '*' -sS -m 5 -o /dev/null https://1.1.1.1 2>/dev/null; then
+  fail "direct-egress" "reached 1.1.1.1 without the keeper"
+else
+  pass "direct-egress" "blocked"
+fi
+
+# 2. No external DNS.
+if getent hosts example.com >/dev/null 2>&1; then
+  fail "dns" "resolved example.com inside the cage"
+else
+  pass "dns" "no resolver"
+fi
+
+# 3. Keeper reachable and an allowlisted host works.
+if [ -z "${HTTPS_PROXY:-}" ]; then
+  fail "keeper" "HTTPS_PROXY is not set"
+else
+  code=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' https://api.github.com 2>&1)
+  rc=$?
+  if [ $rc -eq 0 ]; then pass "allowlisted" "api.github.com via keeper (HTTP $code)"; else fail "allowlisted" "api.github.com via keeper failed: $code"; fi
+
+  # 4. A host that is not allowlisted is refused by the keeper.
+  out=$(curl -sS -m 15 -o /dev/null https://example.com 2>&1)
+  rc=$?
+  if [ $rc -eq 0 ]; then
+    fail "not-allowlisted" "example.com was reachable (is learn mode on for this cage?)"
+  elif printf '%s' "$out" | grep -q '403'; then
+    pass "not-allowlisted" "example.com denied by keeper"
+  else
+    warn "not-allowlisted" "example.com failed, but not with a keeper 403: $out"
+  fi
+fi
+
+# 4b. Only ports 80/443 go through the keeper.
+if [ -n "${HTTPS_PROXY:-}" ]; then
+  # -f: squid answers a denied request with an HTTP 403, which curl otherwise calls success.
+  if curl -fsS -m 10 -o /dev/null http://api.github.com:22/ 2>/dev/null; then fail "keeper-ports" "port 22 was reachable through the keeper"; else pass "keeper-ports" "non-web ports refused"; fi
+fi
+
+# 4c. Unsetting the proxy doesn't help: there's no other route.
+if env -u HTTPS_PROXY -u https_proxy curl -sS -m 5 -o /dev/null https://api.github.com 2>/dev/null; then
+  fail "proxy-bypass" "reached api.github.com without the keeper"
+else
+  pass "proxy-bypass" "no route without the keeper"
+fi
+
+# 5. Masked secrets are empty.
+if [ -n "${ZOO_MASKS:-}" ]; then
+  bad=0; n=0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ -e "$p" ] || continue
+    n=$((n+1))
+    if [ -f "$p" ] && [ -s "$p" ]; then fail "mask" "$p is readable"; bad=1; fi
+    if [ -d "$p" ] && [ -n "$(ls -A "$p" 2>/dev/null)" ]; then fail "mask" "$p is listable"; bad=1; fi
+  done <<< "$ZOO_MASKS"
+  [ $bad -eq 0 ] && pass "mask" "$n secret file(s) hidden"
+else
+  pass "mask" "nothing to mask in this worktree"
+fi
+
+# 6. Git hooks and config are read-only.
+if [ -n "${ZOO_READONLY:-}" ]; then
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ -e "$p" ] || continue
+    if [ -d "$p" ]; then
+      if touch "$p/.zoo-doctor" 2>/dev/null; then rm -f "$p/.zoo-doctor"; fail "git-guard" "$p is writable"; else pass "git-guard" "$p read-only"; fi
+    else
+      if ( : >> "$p" ) 2>/dev/null; then fail "git-guard" "$p is writable"; else pass "git-guard" "$p read-only"; fi
+    fi
+  done <<< "$ZOO_READONLY"
+fi
+
+# 6b. Directories holding read-only paths can't be renamed (a rename would
+# carry the read-only mounts away and let the agent plant a fresh .git/config).
+if [ -n "${ZOO_PIN:-}" ]; then
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ -d "$p" ] || continue
+    if mv "$p" "$p.zoo-doctor" 2>/dev/null; then
+      mv "$p.zoo-doctor" "$p"
+      fail "git-pin" "$p could be renamed"
+    else
+      pass "git-pin" "$p can't be renamed"
+    fi
+  done <<< "$ZOO_PIN"
+fi
+
+# 6c. Nothing from the host beyond the worktree.
+leaks=""
+[ -n "${SSH_AUTH_SOCK:-}" ] && leaks="$leaks SSH_AUTH_SOCK"
+for s in /var/run/docker.sock /run/docker.sock "$HOME/.ssh/id_rsa" "$HOME/.ssh/id_ed25519" "$HOME/.aws/credentials"; do
+  [ -e "$s" ] && leaks="$leaks $s"
+done
+if [ -n "$leaks" ]; then fail "host-leak" "visible in the cage:$leaks"; else pass "host-leak" "no SSH agent, Docker socket or host credentials"; fi
+
+# 6d. Process limit is set.
+pids=$(cat /sys/fs/cgroup/pids.max 2>/dev/null || echo max)
+nproc=$(ulimit -u 2>/dev/null || echo unlimited)
+if [ "$pids" != "max" ]; then
+  pass "pids-limit" "cgroup pids.max $pids"
+elif [ "$nproc" != "unlimited" ]; then
+  pass "pids-limit" "ulimit -u $nproc"
+else
+  fail "pids-limit" "no process limit (fork bombs aren't capped)"
+fi
+
+# 7. zoo-init problems.
+if [ -r /run/zoo/init.log ] && grep -q '^FAIL' /run/zoo/init.log; then
+  warn "init" "$(grep '^FAIL' /run/zoo/init.log | tr '\n' ';')"
+fi
+
+# 8. Host services visible from the cage (the gateway is reachable on internal networks).
+gw=""
+while read -r _iface dest h _rest; do
+  if [ "$dest" = "00000000" ] && [ ${#h} -eq 8 ]; then
+    gw=$(printf '%d.%d.%d.%d' "0x${h:6:2}" "0x${h:4:2}" "0x${h:2:2}" "0x${h:0:2}")
+    break
+  fi
+done < <(tail -n +2 /proc/net/route 2>/dev/null)
+if [ -z "$gw" ]; then
+  ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  [ -n "$ip" ] && gw="${ip%.*}.1"
+fi
+# With no host address on the network (docker), .1 may be the keeper or this
+# cage: those aren't the host.
+self_ips=" $(hostname -I 2>/dev/null) "
+if [ -n "$gw" ] && { [ "$gw" = "${ZOO_KEEPER:-}" ] || [ "${self_ips#* "$gw" }" != "$self_ips" ]; }; then
+  pass "host-exposure" "no host address on this network"
+  gw=""
+fi
+if [ -n "$gw" ]; then
+  open=""
+  for port in 22 80 443 3000 5000 5173 5432 6379 7000 7777 8000 8080 8443 9000; do
+    if timeout 1 bash -c "</dev/tcp/$gw/$port" 2>/dev/null; then open="$open $port"; fi
+  done
+  if [ -n "$open" ]; then
+    # Apple can't stop this (apple/container#1320): warn. Backends that claim
+    # an isolated gateway fail.
+    if [ "${ZOO_HOST_GATEWAY_EXPECTED:-true}" = "true" ]; then
+      warn "host-exposure" "host services reachable at $gw on port(s):$open (bind them to 127.0.0.1)"
+    else
+      fail "host-exposure" "host services reachable at $gw on port(s):$open"
+    fi
+  else
+    pass "host-exposure" "no common host ports reachable at $gw"
+  fi
+fi
+
+# 11. The dashboard isn't reachable from the cage.
+port=${ZOO_DASH_PORT:-7777}
+hit=""
+for h in $gw ${ZOO_KEEPER:-}; do
+  if timeout 1 bash -c "</dev/tcp/$h/$port" 2>/dev/null; then hit="$hit $h"; fi
+done
+if [ -n "$hit" ]; then fail "dashboard" "port $port reachable at$hit"; else pass "dashboard" "port $port unreachable"; fi
