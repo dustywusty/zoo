@@ -1,0 +1,55 @@
+#!/bin/sh
+# zoo-init: PID 1 of every cage. Runs as root, once, before any agent starts.
+#
+#   ZOO_MASKS     newline-separated absolute paths to hide (secrets in the worktree)
+#   ZOO_READONLY  newline-separated absolute paths to make read-only (.git/hooks, .git/config)
+#
+# Results go to /run/zoo/init.log so `zoo doctor` can report what held.
+set -u
+LOG=/run/zoo/init.log
+mkdir -p /run/zoo
+: > "$LOG"
+chmod 0644 "$LOG"
+
+ok()   { echo "ok   $*" >> "$LOG"; }
+fail() { echo "FAIL $*" >> "$LOG"; }
+
+mask() {
+  p=$1
+  [ -e "$p" ] || return 0
+  if [ -d "$p" ]; then
+    if mount -t tmpfs -o ro,size=4k,mode=0555 zoo-mask "$p" 2>>"$LOG"; then ok "mask $p"; else fail "mask $p"; fi
+  else
+    if mount --bind /etc/zoo/masked "$p" 2>>"$LOG" && mount -o remount,bind,ro "$p" 2>>"$LOG"; then
+      ok "mask $p"
+    else
+      fail "mask $p"
+    fi
+  fi
+}
+
+readonly_path() {
+  p=$1
+  [ -e "$p" ] || return 0
+  if mount --bind "$p" "$p" 2>>"$LOG" && mount -o remount,bind,ro "$p" 2>>"$LOG"; then
+    ok "readonly $p"
+  else
+    fail "readonly $p"
+  fi
+}
+
+if [ -n "${ZOO_MASKS:-}" ]; then
+  printf '%s\n' "$ZOO_MASKS" | while IFS= read -r p; do [ -n "$p" ] && mask "$p"; done
+fi
+if [ -n "${ZOO_READONLY:-}" ]; then
+  printf '%s\n' "$ZOO_READONLY" | while IFS= read -r p; do [ -n "$p" ] && readonly_path "$p"; done
+fi
+
+echo "done" >> "$LOG"
+
+# Idle forever; reap zombies left by agent sessions.
+trap 'exit 0' TERM INT
+while :; do
+  sleep 3600 &
+  wait $!
+done

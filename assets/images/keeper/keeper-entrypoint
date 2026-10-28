@@ -1,0 +1,10 @@
+#!/bin/sh
+# Config and allowlist come from the host (~/.zoo/keeper/etc), mounted at /etc/zoo.
+# The access log goes to the host (~/.zoo/keeper/log), mounted at /var/log/zoo,
+# where the zoo daemon tails it.
+set -eu
+mkdir -p /var/log/zoo /var/spool/squid /run/squid
+chmod 0777 /var/log/zoo 2>/dev/null || true
+chown -R proxy:proxy /var/spool/squid /run/squid 2>/dev/null || true
+squid -k parse -f /etc/zoo/squid.conf
+exec squid -N -f /etc/zoo/squid.conf

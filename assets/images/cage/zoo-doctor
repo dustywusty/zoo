@@ -1,0 +1,99 @@
+#!/bin/bash
+# zoo-doctor: run inside a cage as the agent user. Proves the walls hold.
+# Prints one line per check: PASS|FAIL|WARN <check>: <detail>
+set -u
+
+pass() { echo "PASS $1: $2"; }
+fail() { echo "FAIL $1: $2"; }
+warn() { echo "WARN $1: $2"; }
+
+# 1. No direct route to the internet (IP literal, so DNS doesn't matter).
+if curl --noproxy '*' -sS -m 5 -o /dev/null https://1.1.1.1 2>/dev/null; then
+  fail "direct-egress" "reached 1.1.1.1 without the keeper"
+else
+  pass "direct-egress" "blocked"
+fi
+
+# 2. No external DNS.
+if getent hosts example.com >/dev/null 2>&1; then
+  fail "dns" "resolved example.com inside the cage"
+else
+  pass "dns" "no resolver"
+fi
+
+# 3. Keeper reachable and an allowlisted host works.
+if [ -z "${HTTPS_PROXY:-}" ]; then
+  fail "keeper" "HTTPS_PROXY is not set"
+else
+  code=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' https://api.github.com 2>&1)
+  rc=$?
+  if [ $rc -eq 0 ]; then pass "allowlisted" "api.github.com via keeper (HTTP $code)"; else fail "allowlisted" "api.github.com via keeper failed: $code"; fi
+
+  # 4. A host that is not allowlisted is refused by the keeper.
+  out=$(curl -sS -m 15 -o /dev/null https://example.com 2>&1)
+  rc=$?
+  if [ $rc -eq 0 ]; then
+    fail "not-allowlisted" "example.com was reachable (is learn mode on for this cage?)"
+  elif printf '%s' "$out" | grep -q '403'; then
+    pass "not-allowlisted" "example.com denied by keeper"
+  else
+    warn "not-allowlisted" "example.com failed, but not with a keeper 403: $out"
+  fi
+fi
+
+# 5. Masked secrets are empty.
+if [ -n "${ZOO_MASKS:-}" ]; then
+  bad=0; n=0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ -e "$p" ] || continue
+    n=$((n+1))
+    if [ -f "$p" ] && [ -s "$p" ]; then fail "mask" "$p is readable"; bad=1; fi
+    if [ -d "$p" ] && [ -n "$(ls -A "$p" 2>/dev/null)" ]; then fail "mask" "$p is listable"; bad=1; fi
+  done <<< "$ZOO_MASKS"
+  [ $bad -eq 0 ] && pass "mask" "$n secret file(s) hidden"
+else
+  pass "mask" "nothing to mask in this worktree"
+fi
+
+# 6. Git hooks and config are read-only.
+if [ -n "${ZOO_READONLY:-}" ]; then
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ -e "$p" ] || continue
+    if [ -d "$p" ]; then
+      if touch "$p/.zoo-doctor" 2>/dev/null; then rm -f "$p/.zoo-doctor"; fail "git-guard" "$p is writable"; else pass "git-guard" "$p read-only"; fi
+    else
+      if ( : >> "$p" ) 2>/dev/null; then fail "git-guard" "$p is writable"; else pass "git-guard" "$p read-only"; fi
+    fi
+  done <<< "$ZOO_READONLY"
+fi
+
+# 7. zoo-init problems.
+if [ -r /run/zoo/init.log ] && grep -q '^FAIL' /run/zoo/init.log; then
+  warn "init" "$(grep '^FAIL' /run/zoo/init.log | tr '\n' ';')"
+fi
+
+# 8. Host services visible from the cage (the gateway is reachable on internal networks).
+gw=""
+while read -r _iface dest h _rest; do
+  if [ "$dest" = "00000000" ] && [ ${#h} -eq 8 ]; then
+    gw=$(printf '%d.%d.%d.%d' "0x${h:6:2}" "0x${h:4:2}" "0x${h:2:2}" "0x${h:0:2}")
+    break
+  fi
+done < <(tail -n +2 /proc/net/route 2>/dev/null)
+if [ -z "$gw" ]; then
+  ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  [ -n "$ip" ] && gw="${ip%.*}.1"
+fi
+if [ -n "$gw" ]; then
+  open=""
+  for port in 22 80 443 3000 5000 5173 5432 6379 7000 7777 8000 8080 8443 9000; do
+    if timeout 1 bash -c "</dev/tcp/$gw/$port" 2>/dev/null; then open="$open $port"; fi
+  done
+  if [ -n "$open" ]; then
+    warn "host-exposure" "Mac services reachable at $gw on port(s):$open (bind them to 127.0.0.1)"
+  else
+    pass "host-exposure" "no common Mac ports reachable at $gw"
+  fi
+fi

@@ -1,0 +1,606 @@
+// Package daemon is the zoo host daemon: it tails the keeper's access log,
+// polls cage resources, raises alerts and serves the dashboard on 127.0.0.1.
+package daemon
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	_ "embed"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/dusty/zoo/internal/cage"
+	"github.com/dusty/zoo/internal/config"
+	"github.com/dusty/zoo/internal/ctr"
+	"github.com/dusty/zoo/internal/keeper"
+	"github.com/dusty/zoo/internal/paths"
+)
+
+//go:embed web/index.html
+var indexHTML string
+
+const maxEvents = 5000
+
+// NetEvent is a keeper event attributed to a cage.
+type NetEvent struct {
+	ID int64 `json:"id"`
+	keeper.Event
+	Cage        string `json:"cage"`
+	FirstSeen   bool   `json:"first_seen"`  // first time this cage reached this host
+	Allowlisted bool   `json:"allowlisted"` // host is on the allowlist right now
+	Learn       bool   `json:"learn"`       // cage was in learn mode
+}
+
+type Alert struct {
+	ID    int64     `json:"id"`
+	Time  time.Time `json:"time"`
+	Level string    `json:"level"` // warn | crit
+	Cage  string    `json:"cage"`
+	Title string    `json:"title"`
+	Body  string    `json:"body"`
+}
+
+type Counts struct {
+	Requests int64 `json:"requests"`
+	Denied   int64 `json:"denied"`
+	BytesOut int64 `json:"bytes_out"`
+	BytesIn  int64 `json:"bytes_in"`
+	Hosts    int   `json:"hosts"`
+}
+
+type Session struct {
+	ID      string    `json:"id"`
+	Cage    string    `json:"cage"`
+	Harness string    `json:"harness"`
+	Started time.Time `json:"started"`
+	HostPID int       `json:"host_pid"`
+}
+
+type Server struct {
+	cfg   config.Global
+	token string
+
+	mu        sync.Mutex
+	cages     []cage.Info
+	keeperUp  bool
+	keeperIP  string
+	stats     map[string]Stat // by container id
+	events    []NetEvent
+	alerts    []Alert
+	counts    map[string]*Counts
+	seen      map[string]map[string]bool
+	sentBytes map[string]int64 // cage|host -> bytes out
+	alerted   map[string]time.Time
+	sessions  map[string]Session
+	allowlist []string
+	nextID    int64
+	subs      map[chan []byte]struct{}
+	lastErr   string
+}
+
+// Token returns the dashboard token, creating it on first use.
+func Token() (string, error) {
+	if b, err := os.ReadFile(paths.Token()); err == nil && len(bytes.TrimSpace(b)) > 0 {
+		return string(bytes.TrimSpace(b)), nil
+	}
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	t := hex.EncodeToString(buf)
+	return t, os.WriteFile(paths.Token(), []byte(t+"\n"), 0o600)
+}
+
+func New(cfg config.Global) (*Server, error) {
+	tok, err := Token()
+	if err != nil {
+		return nil, err
+	}
+	return &Server{
+		cfg: cfg, token: tok,
+		stats: map[string]Stat{}, counts: map[string]*Counts{},
+		seen: map[string]map[string]bool{}, sentBytes: map[string]int64{},
+		alerted: map[string]time.Time{}, sessions: map[string]Session{},
+		subs: map[chan []byte]struct{}{},
+	}, nil
+}
+
+// Run serves until ctx is done.
+func (s *Server) Run(ctx context.Context) error {
+	s.refreshAllowlist()
+	s.pollCages()
+	// Backfill recent history so the feed isn't empty after a restart, then
+	// tail from exactly where the backfill stopped (0 if the log is new).
+	var start int64
+	if st, err := os.Stat(paths.AccessLog()); err == nil {
+		start = st.Size()
+	}
+	for _, e := range keeper.ReadTail(1000, start) {
+		s.ingest(e, false)
+	}
+	go s.loop(ctx, 2*time.Second, s.pollCages)
+	go s.loop(ctx, 2*time.Second, s.pollStats)
+	go s.loop(ctx, 5*time.Second, s.refreshAllowlist)
+	go s.loop(ctx, 2*time.Second, s.broadcastState)
+	go s.tail(ctx, start)
+
+	addr := fmt.Sprintf("127.0.0.1:%d", s.cfg.Port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Handler: s.routes(), ReadHeaderTimeout: 5 * time.Second}
+	go func() { <-ctx.Done(); _ = srv.Close() }()
+	log.Printf("zoo dashboard on http://%s", addr)
+	err = srv.Serve(ln)
+	if err == http.ErrServerClosed {
+		return nil
+	}
+	return err
+}
+
+func (s *Server) loop(ctx context.Context, every time.Duration, fn func()) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			fn()
+		}
+	}
+}
+
+// --- polling ---------------------------------------------------------------
+
+func (s *Server) pollCages() {
+	cs, err := cage.List(s.cfg)
+	kc, kok := ctr.Get(keeper.Name, s.cfg.Network)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		s.lastErr = err.Error()
+		return
+	}
+	s.lastErr = ""
+	s.cages = cs
+	s.keeperUp = kok && kc.Running()
+	s.keeperIP = kc.IP
+	// Drop sessions whose `zoo run` process is gone (killed without cleanup).
+	for id, ss := range s.sessions {
+		if ss.HostPID > 0 && !alive(ss.HostPID) {
+			delete(s.sessions, id)
+		}
+	}
+}
+
+func alive(pid int) bool {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
+}
+
+func (s *Server) pollStats() {
+	arr, err := ctr.Stats()
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := map[string]Stat{}
+	for _, el := range arr {
+		id, _ := parseStat(el, nil, now)
+		if id == "" {
+			continue
+		}
+		var prev *Stat
+		if p, ok := s.stats[id]; ok {
+			prev = &p
+		}
+		_, st := parseStat(el, prev, now)
+		next[id] = st
+	}
+	s.stats = next
+}
+
+func (s *Server) refreshAllowlist() {
+	l, err := keeper.ReadAllowlist()
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	s.allowlist = l
+	s.mu.Unlock()
+}
+
+// --- keeper log --------------------------------------------------------------
+
+func (s *Server) tail(ctx context.Context, off int64) {
+	var partial []byte
+	t := time.NewTicker(400 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		f, err := os.Open(paths.AccessLog())
+		if err != nil {
+			continue
+		}
+		st, err := f.Stat()
+		if err != nil {
+			f.Close()
+			continue
+		}
+		if st.Size() < off {
+			// Truncated or replaced: start over.
+			off = 0
+			partial = nil
+		}
+		if st.Size() > off {
+			if _, err := f.Seek(off, io.SeekStart); err == nil {
+				buf, _ := io.ReadAll(io.LimitReader(f, st.Size()-off))
+				off += int64(len(buf))
+				buf = append(partial, buf...)
+				lines := bytes.Split(buf, []byte("\n"))
+				partial = append([]byte(nil), lines[len(lines)-1]...)
+				for _, l := range lines[:len(lines)-1] {
+					if e, ok := keeper.ParseLine(string(l)); ok {
+						s.ingest(e, true)
+					}
+				}
+			}
+		}
+		f.Close()
+	}
+}
+
+func (s *Server) cageForIP(ip string) string {
+	for _, c := range s.cages {
+		if c.IP == ip {
+			return c.Name
+		}
+	}
+	if ip == "127.0.0.1" || ip == "::1" {
+		return "keeper"
+	}
+	return "unknown " + ip
+}
+
+func (s *Server) ingest(e keeper.Event, live bool) {
+	learn := keeper.LearnIPs()
+	s.mu.Lock()
+	s.nextID++
+	ev := NetEvent{ID: s.nextID, Event: e, Cage: s.cageForIP(e.Client), Learn: learn[e.Client]}
+	ev.Allowlisted = keeper.Allowed(s.allowlist, e.Host)
+	if s.seen[ev.Cage] == nil {
+		s.seen[ev.Cage] = map[string]bool{}
+	}
+	if !s.seen[ev.Cage][e.Host] {
+		s.seen[ev.Cage][e.Host] = true
+		ev.FirstSeen = true
+	}
+	c := s.counts[ev.Cage]
+	if c == nil {
+		c = &Counts{}
+		s.counts[ev.Cage] = c
+	}
+	c.Requests++
+	c.BytesIn += e.BytesIn
+	c.BytesOut += e.BytesOut
+	c.Hosts = len(s.seen[ev.Cage])
+	if e.Denied {
+		c.Denied++
+	}
+	s.events = append(s.events, ev)
+	if len(s.events) > maxEvents {
+		s.events = s.events[len(s.events)-maxEvents:]
+	}
+
+	var alerts []Alert
+	if live {
+		if e.Denied && s.once("deny|"+ev.Cage+"|"+e.Host, 10*time.Minute) {
+			alerts = append(alerts, s.newAlert("warn", ev.Cage, "Blocked request to "+e.Host,
+				fmt.Sprintf("%s %s was denied by the keeper.", e.Method, e.URL)))
+		}
+		k := ev.Cage + "|" + e.Host
+		s.sentBytes[k] += e.BytesOut
+		if s.cfg.BytesOutAlert > 0 && s.sentBytes[k] > s.cfg.BytesOutAlert && s.once("bytes|"+k, 24*time.Hour) {
+			alerts = append(alerts, s.newAlert("crit", ev.Cage, "Large upload to "+e.Host,
+				fmt.Sprintf("%s has sent %s to %s.", ev.Cage, human(s.sentBytes[k]), e.Host)))
+		}
+	}
+	s.mu.Unlock()
+
+	if live {
+		s.publish("net", ev)
+		for _, a := range alerts {
+			s.publish("alert", a)
+			go s.notify(a)
+		}
+	}
+}
+
+func (s *Server) once(key string, every time.Duration) bool {
+	if t, ok := s.alerted[key]; ok && time.Since(t) < every {
+		return false
+	}
+	s.alerted[key] = time.Now()
+	return true
+}
+
+func (s *Server) newAlert(level, cage, title, body string) Alert {
+	s.nextID++
+	a := Alert{ID: s.nextID, Time: time.Now().UTC(), Level: level, Cage: cage, Title: title, Body: body}
+	s.alerts = append(s.alerts, a)
+	if len(s.alerts) > 500 {
+		s.alerts = s.alerts[len(s.alerts)-500:]
+	}
+	return a
+}
+
+func (s *Server) notify(a Alert) {
+	if s.cfg.NtfyURL == "" {
+		return
+	}
+	req, err := http.NewRequest("POST", s.cfg.NtfyURL, strings.NewReader(a.Body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Title", "zoo: "+a.Title)
+	if a.Level == "crit" {
+		req.Header.Set("Priority", "high")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if resp, err := http.DefaultClient.Do(req.WithContext(ctx)); err == nil {
+		resp.Body.Close()
+	}
+}
+
+func human(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
+}
+
+// --- pub/sub ---------------------------------------------------------------
+
+func (s *Server) publish(kind string, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	msg := []byte("event: " + kind + "\ndata: " + string(b) + "\n\n")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for ch := range s.subs {
+		select {
+		case ch <- msg:
+		default: // slow client; drop
+		}
+	}
+}
+
+type cageView struct {
+	cage.Info
+	Stat     *Stat     `json:"stat,omitempty"`
+	Counts   Counts    `json:"counts"`
+	Sessions []Session `json:"sessions"`
+	Learn    bool      `json:"learn"`
+}
+
+type stateView struct {
+	Cages     []cageView `json:"cages"`
+	Keeper    any        `json:"keeper"`
+	Allowlist []string   `json:"allowlist"`
+	Error     string     `json:"error,omitempty"`
+	Now       time.Time  `json:"now"`
+}
+
+func (s *Server) snapshot() stateView {
+	learn := keeper.LearnIPs()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := stateView{
+		Keeper:    map[string]any{"running": s.keeperUp, "ip": s.keeperIP},
+		Allowlist: append([]string(nil), s.allowlist...),
+		Error:     s.lastErr,
+		Now:       time.Now().UTC(),
+	}
+	for _, c := range s.cages {
+		cv := cageView{Info: c, Learn: c.IP != "" && learn[c.IP]}
+		if st, ok := s.stats[c.ID]; ok {
+			st := st
+			cv.Stat = &st
+		}
+		if cnt := s.counts[c.Name]; cnt != nil {
+			cv.Counts = *cnt
+		}
+		for _, ss := range s.sessions {
+			if ss.Cage == c.Name {
+				cv.Sessions = append(cv.Sessions, ss)
+			}
+		}
+		v.Cages = append(v.Cages, cv)
+	}
+	return v
+}
+
+func (s *Server) broadcastState() { s.publish("state", s.snapshot()) }
+
+// --- HTTP ---------------------------------------------------------------------
+
+func (s *Server) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", s.handleIndex)
+	mux.HandleFunc("GET /api/state", s.handleState)
+	mux.HandleFunc("GET /api/stream", s.handleStream)
+	mux.HandleFunc("POST /api/cages/{id}/stop", s.handleStop)
+	mux.HandleFunc("POST /api/allow", s.handleAllow)
+	mux.HandleFunc("POST /api/sessions", s.handleSessionStart)
+	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleSessionEnd)
+	return s.guard(mux)
+}
+
+// guard blocks DNS rebinding (Host must be loopback) and cross-site writes
+// (state changes need the token header, which a foreign page can't send).
+func (s *Server) guard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			host = r.Host
+		}
+		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
+		if r.Method != http.MethodGet && r.Header.Get("X-Zoo-Token") != s.token {
+			http.Error(w, "missing or bad token", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'")
+	io.WriteString(w, strings.Replace(indexHTML, "__ZOO_TOKEN__", s.token, 1))
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
+	v := s.snapshot()
+	s.mu.Lock()
+	events := append([]NetEvent(nil), s.events...)
+	alerts := append([]Alert(nil), s.alerts...)
+	s.mu.Unlock()
+	if len(events) > 1000 {
+		events = events[len(events)-1000:]
+	}
+	writeJSON(w, map[string]any{"state": v, "events": events, "alerts": alerts})
+}
+
+func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "no streaming", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	ch := make(chan []byte, 256)
+	s.mu.Lock()
+	s.subs[ch] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.subs, ch)
+		s.mu.Unlock()
+	}()
+	io.WriteString(w, ": hello\n\n")
+	fl.Flush()
+	ping := time.NewTicker(15 * time.Second)
+	defer ping.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case m := <-ch:
+			w.Write(m)
+			fl.Flush()
+		case <-ping.C:
+			io.WriteString(w, ": ping\n\n")
+			fl.Flush()
+		}
+	}
+}
+
+func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !strings.HasPrefix(id, cage.Prefix) || id == keeper.Name {
+		http.Error(w, "not a cage", http.StatusBadRequest)
+		return
+	}
+	if err := ctr.Stop(id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	go s.pollCages()
+	writeJSON(w, map[string]string{"stopped": id})
+}
+
+func (s *Server) handleAllow(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Host string `json:"host"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil || body.Host == "" {
+		http.Error(w, "need {\"host\": ...}", http.StatusBadRequest)
+		return
+	}
+	added, err := keeper.Allow(body.Host)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(added) > 0 {
+		if err := keeper.Reload(); err != nil {
+			http.Error(w, "saved, but keeper reload failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	s.refreshAllowlist()
+	writeJSON(w, map[string]any{"added": added})
+}
+
+func (s *Server) handleSessionStart(w http.ResponseWriter, r *http.Request) {
+	var ss Session
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&ss); err != nil || ss.Cage == "" {
+		http.Error(w, "bad session", http.StatusBadRequest)
+		return
+	}
+	buf := make([]byte, 6)
+	_, _ = rand.Read(buf)
+	ss.ID = hex.EncodeToString(buf)
+	ss.Started = time.Now().UTC()
+	s.mu.Lock()
+	s.sessions[ss.ID] = ss
+	s.mu.Unlock()
+	writeJSON(w, ss)
+}
+
+func (s *Server) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	delete(s.sessions, r.PathValue("id"))
+	s.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
