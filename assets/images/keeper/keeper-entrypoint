@@ -2,9 +2,18 @@
 # Config and allowlist come from the host (~/.zoo/keeper/etc), mounted at /etc/zoo.
 # The access log goes to the host (~/.zoo/keeper/log), mounted at /var/log/zoo,
 # where the zoo daemon tails it.
+#
+# squid must not be PID 1: `squid -k reconfigure` (how zoo applies allowlist
+# and learn-mode changes) refuses a pid file that says 1. So this shell stays
+# PID 1, forwards stop signals, and exits when squid does.
 set -eu
 mkdir -p /var/log/zoo /var/spool/squid /run/squid
 chmod 0777 /var/log/zoo 2>/dev/null || true
 chown -R proxy:proxy /var/spool/squid /run/squid 2>/dev/null || true
 squid -k parse -f /etc/zoo/squid.conf
-exec squid -N -f /etc/zoo/squid.conf
+squid -N -f /etc/zoo/squid.conf &
+pid=$!
+trap 'kill -TERM "$pid" 2>/dev/null' TERM INT
+# wait returns early when a trapped signal arrives; wait again for the exit.
+wait "$pid" || true
+wait "$pid" 2>/dev/null || true
