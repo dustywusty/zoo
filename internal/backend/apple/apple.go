@@ -141,8 +141,8 @@ func (a *Apple) ImageExists(ctx context.Context, ref string) (bool, error) {
 
 func (a *Apple) BuildImage(ctx context.Context, s backend.ImageSpec) error {
 	args := []string{"build", "-t", s.Tag}
-	for k, v := range s.BuildArgs {
-		args = append(args, "--build-arg", k+"="+v)
+	for _, k := range backend.SortedKeys(s.BuildArgs) {
+		args = append(args, "--build-arg", k+"="+s.BuildArgs[k])
 	}
 	return a.cli.Attach(ctx, append(args, s.Context)...)
 }
@@ -153,13 +153,8 @@ func (a *Apple) networkExists(ctx context.Context, name string) bool {
 		return false
 	}
 	for _, n := range arr {
-		hit := false
-		jsonx.Walk(n, func(_ string, v any) {
-			if s, ok := v.(string); ok && s == name {
-				hit = true
-			}
-		})
-		if hit {
+		// Match the id only: a label value equal to the name doesn't count.
+		if m, ok := n.(map[string]any); ok && m["id"] == name {
 			return true
 		}
 	}
@@ -278,17 +273,27 @@ func (a *Apple) RunArgs(s backend.CageSpec) ([]string, error) {
 			return nil, err
 		}
 	}
-	pinned := map[string]bool{}
+	// Directories mounted as directories: the worktree, extra rw dirs, pins,
+	// and read-only dirs.
+	dirMounted := map[string]bool{}
+	for _, m := range s.Mounts {
+		dirMounted[m.Source] = true
+	}
 	for _, p := range s.Pin {
-		pinned[p] = true
+		dirMounted[p] = true
+	}
+	for _, p := range s.ReadOnly {
+		if st, err := os.Stat(p); err == nil && st.IsDir() {
+			dirMounted[p] = true
+		}
 	}
 	for i, p := range backend.Existing(s.ReadOnly) {
 		src := p
-		if st, err := os.Stat(p); err == nil && !st.IsDir() && pinned[filepath.Dir(p)] {
-			// `container` shares a file mount's parent directory and then drops
-			// any directory mount of that same source, which would undo the pin
-			// (verified on 1.6.1). Mount a staged read-only copy instead; host
-			// edits show up in the cage after `zoo reset`.
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && dirMounted[filepath.Dir(p)] {
+			// `container` shares a file mount's parent directory and can then
+			// drop a directory mount of that same source; seen undoing a pin
+			// on 1.6.1. Mount a staged read-only copy instead; host edits show
+			// up in the cage after `zoo reset`.
 			staged, err := a.stage(s.ID, i, p)
 			if err != nil {
 				return nil, fmt.Errorf("stage read-only copy of %s: %w", p, err)

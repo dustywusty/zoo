@@ -299,8 +299,8 @@ func exists(p string) bool {
 }
 
 func (d *Docker) CreateCage(ctx context.Context, s backend.CageSpec) error {
-	if len(s.Masks) > 0 && d.maskFile == "" {
-		return fmt.Errorf("docker backend needs a mask file to hide %d secret file(s)", len(s.Masks))
+	if masks := backend.Existing(s.Masks); len(masks) > 0 && d.maskFile == "" {
+		return fmt.Errorf("docker backend needs a mask file to hide %d secret file(s)", len(masks))
 	}
 	_, err := d.cli.Run(ctx, d.RunArgs(s)...)
 	return err

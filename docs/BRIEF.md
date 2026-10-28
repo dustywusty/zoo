@@ -915,7 +915,7 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 - [x] Docker/Podman driver with host-side masks and hardening flags (escape suite PASS on OrbStack 29.8.2; podman untested: no machine)
 - [x] Isolation levels, `isolation_floor`, badges (I12)
 - [x] `zoo backend`
-- [ ] Contract suite + docker fake
+- [x] Contract suite + fakes (`internal/backend/contract`, `test/fakes/fakectr`: apple 1.6.1 and docker 29 dialects, podman via docker dialect)
 - [ ] Linux CI gate (`.github/workflows/ci.yml` written; not run until pushed: `needs-human`)
 
 **M2: Allowlist layers, gc, first-seen**
