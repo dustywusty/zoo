@@ -9,7 +9,7 @@ ARG AGENT_GID=20
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash ca-certificates curl git git-lfs jq less openssh-client procps \
-      python3 python3-pip python3-venv ripgrep unzip util-linux xz-utils \
+      python3 python3-pip python3-venv ripgrep socat unzip util-linux xz-utils \
  && rm -rf /var/lib/apt/lists/*
 
 # Python tooling and agent CLIs, installed at build time (with network),
@@ -33,7 +33,8 @@ RUN printf '{"hasCompletedOnboarding":true,"autoUpdates":false}\n' > /home/agent
 
 COPY zoo-init /usr/local/bin/zoo-init
 COPY zoo-doctor /usr/local/bin/zoo-doctor
-RUN chmod 0755 /usr/local/bin/zoo-init /usr/local/bin/zoo-doctor
+COPY zoo-session /usr/local/bin/zoo-session
+RUN chmod 0755 /usr/local/bin/zoo-init /usr/local/bin/zoo-doctor /usr/local/bin/zoo-session
 
 ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     DISABLE_AUTOUPDATER=1 \

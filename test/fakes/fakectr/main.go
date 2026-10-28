@@ -152,6 +152,9 @@ func (f *fake) newNetwork(name string, internal bool, labels map[string]string) 
 	sub := 128
 	if !f.apple() {
 		sub = 97
+		if name == "zoo-egress" && !f.subnetUsed(107) {
+			sub = 107 // gateway 192.168.107.1, as on OrbStack
+		}
 	}
 	for {
 		used := false
@@ -168,6 +171,15 @@ func (f *fake) newNetwork(name string, internal bool, labels map[string]string) 
 	n := &fakestate.Network{Name: name, Internal: internal, Labels: labels, Subnet: sub, Next: 2}
 	f.st.Networks = append(f.st.Networks, n)
 	return n
+}
+
+func (f *fake) subnetUsed(sub int) bool {
+	for _, n := range f.st.Networks {
+		if n.Subnet == sub {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fake) nextIP(network string) string {

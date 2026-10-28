@@ -162,11 +162,13 @@ func (a *Apple) networkExists(ctx context.Context, name string) bool {
 }
 
 func (a *Apple) EnsureNetwork(ctx context.Context) error {
-	if a.networkExists(ctx, a.network) {
-		return nil
-	}
-	if _, err := a.cli.Run(ctx, "network", "create", "--internal", "--label", "zoo=1", a.network); err != nil {
-		return fmt.Errorf("create internal network %s (needs macOS 26+): %w", a.network, err)
+	for _, n := range []string{a.network, backend.ServicesNetwork} {
+		if a.networkExists(ctx, n) {
+			continue
+		}
+		if _, err := a.cli.Run(ctx, "network", "create", "--internal", "--label", "zoo=1", n); err != nil {
+			return fmt.Errorf("create internal network %s (needs macOS 26+): %w", n, err)
+		}
 	}
 	return nil
 }
@@ -189,7 +191,9 @@ func (a *Apple) EnsureKeeper(ctx context.Context, s backend.KeeperSpec) (string,
 	}
 	if !exists {
 		args := []string{"run", "-d", "--name", s.ID,
-			"--network", "default", "--network", a.network,
+			// `container` can't attach networks later, so the keeper joins
+			// every network it will ever need now.
+			"--network", "default", "--network", a.network, "--network", backend.ServicesNetwork,
 			"-c", fmt.Sprint(s.CPUs), "-m", s.Memory}
 		args = append(args, labelArgs(s.Labels)...)
 		args = append(args, "-v", s.EtcDir+":/etc/zoo", "-v", s.LogDir+":/var/log/zoo", s.Image)
@@ -237,7 +241,7 @@ func (a *Apple) inspectIP(ctx context.Context, id string) (string, error) {
 func (a *Apple) RunArgs(s backend.CageSpec) ([]string, error) {
 	args := []string{"run", "-d",
 		"--name", s.ID,
-		"--network", a.network,
+		"--network", or(s.Network, a.network),
 		"--no-dns",
 		"-c", fmt.Sprint(s.CPUs),
 		"-m", s.Memory,
@@ -388,6 +392,21 @@ func (a *Apple) List(ctx context.Context) ([]backend.Status, error) {
 			}
 		}
 		st.IP = jsonx.IPOnNetwork(el, a.network)
+		st.IPs = map[string]string{}
+		if m, ok := el.(map[string]any); ok {
+			if stat, ok := m["status"].(map[string]any); ok {
+				nets, _ := stat["networks"].([]any)
+				for _, n := range nets {
+					nm, _ := n.(map[string]any)
+					name, _ := nm["network"].(string)
+					addr, _ := nm["ipv4Address"].(string)
+					if name != "" && addr != "" {
+						ip, _, _ := strings.Cut(addr, "/")
+						st.IPs[name] = ip
+					}
+				}
+			}
+		}
 		out = append(out, st)
 	}
 	return out, nil
@@ -406,6 +425,80 @@ func (a *Apple) Get(ctx context.Context, id string) (backend.Status, bool, error
 	return backend.Status{}, false, nil
 }
 
+// CageNetwork: Apple cages share one network, because `container` can't
+// attach a network to the running keeper.
+func (a *Apple) CageNetwork(ctx context.Context, cageID string) (string, string, error) {
+	ip, err := a.inspectIP(ctx, backend.KeeperID)
+	return a.network, ip, err
+}
+
+func (a *Apple) EnsureSidecar(ctx context.Context, s backend.SidecarSpec) (string, error) {
+	st, exists, err := a.Get(ctx, s.ID)
+	if err != nil {
+		return "", err
+	}
+	if exists && !st.Running {
+		if err := a.Start(ctx, s.ID); err != nil {
+			return "", err
+		}
+	}
+	if !exists {
+		args := []string{"run", "-d", "--name", s.ID, "--network", backend.ServicesNetwork, "--no-dns"}
+		args = append(args, labelArgs(s.Labels)...)
+		for _, e := range s.Env {
+			args = append(args, "-e", e)
+		}
+		for _, m := range s.Mounts {
+			if strings.Contains(m.Source, ":") || strings.Contains(m.Target, ":") {
+				return "", fmt.Errorf("can't mount %q into an Apple sidecar: paths with ':' aren't supported", m.Source)
+			}
+			v := m.Source + ":" + m.Target
+			if m.ReadOnly {
+				v += ":ro"
+			}
+			args = append(args, "-v", v)
+		}
+		if _, err := a.cli.Run(ctx, append(args, s.Image)...); err != nil && !alreadyExists(err) {
+			// (The daemon and the CLI may race to create it; the loser is fine.)
+			return "", fmt.Errorf("start sidecar %s: %w", s.ID, err)
+		}
+	}
+	for i := 0; i < 40; i++ {
+		if st, ok, _ := a.Get(ctx, s.ID); ok && st.IPs[backend.ServicesNetwork] != "" {
+			return st.IPs[backend.ServicesNetwork], nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return "", fmt.Errorf("sidecar %s has no address on %s", s.ID, backend.ServicesNetwork)
+}
+
+// HostBridge listens on the host's address on the `default` network: the
+// keeper reaches it there; cages, on host-only networks, can't (verified on
+// 1.6.1).
+func (a *Apple) HostBridge(ctx context.Context) (string, string, error) {
+	arr, err := a.listJSON(ctx, "network", "list")
+	if err != nil {
+		return "", "", err
+	}
+	for _, n := range arr {
+		m, _ := n.(map[string]any)
+		if m["id"] != "default" {
+			continue
+		}
+		if gw := jsonx.String(m, "ipv4Gateway"); gw != "" {
+			return gw, gw, nil
+		}
+	}
+	return "", "", fmt.Errorf("can't find the host's address on the default network")
+}
+
+func or(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
+
 func (a *Apple) Exec(ctx context.Context, s backend.ExecSpec) (int, error) {
 	return a.cli.Exec(ctx, s)
 }
@@ -422,4 +515,9 @@ func (a *Apple) Sample(ctx context.Context) ([]backend.Sample, error) {
 		}
 	}
 	return out, nil
+}
+
+func alreadyExists(err error) bool {
+	m := strings.ToLower(err.Error())
+	return strings.Contains(m, "already in use") || strings.Contains(m, "already exists") || strings.Contains(m, "conflict")
 }

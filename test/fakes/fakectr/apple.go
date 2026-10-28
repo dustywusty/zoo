@@ -327,8 +327,8 @@ func (f *fake) appleNetwork(args []string) error {
 				"state":  "running",
 				"config": map[string]any{"id": n.Name, "mode": mode, "labels": labels},
 				"status": map[string]any{
-					"address": fmt.Sprintf("192.168.%d.0/24", n.Subnet),
-					"gateway": fmt.Sprintf("192.168.%d.1", n.Subnet),
+					"ipv4Subnet":  fmt.Sprintf("192.168.%d.0/24", n.Subnet),
+					"ipv4Gateway": fmt.Sprintf("192.168.%d.1", n.Subnet),
 				},
 			})
 		}

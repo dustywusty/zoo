@@ -11,7 +11,29 @@ import (
 	"github.com/dusty/zoo/test/fakes/fakestate"
 )
 
-const jsonFormat = "{{json .}}"
+const (
+	jsonFormat    = "{{json .}}"
+	gatewayFormat = "{{range .IPAM.Config}}{{.Gateway}} {{end}}"
+)
+
+func (f *fake) dockerNetJSON(n *fakestate.Network) map[string]any {
+	containers := map[string]any{}
+	for _, c := range f.st.Containers {
+		if c.Running && containsStr(c.Networks, n.Name) {
+			containers[c.ID] = map[string]any{"Name": c.Name, "IPv4Address": c.IPs[n.Name] + "/24"}
+		}
+	}
+	labels := n.Labels
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	return map[string]any{
+		"Name": n.Name, "Id": hashID("net/" + n.Name), "Driver": "bridge", "Internal": n.Internal, "Labels": labels,
+		"IPAM": map[string]any{"Config": []any{map[string]any{
+			"Subnet": fmt.Sprintf("192.168.%d.0/24", n.Subnet), "Gateway": fmt.Sprintf("192.168.%d.1", n.Subnet)}}},
+		"Containers": containers,
+	}
+}
 
 // dockerCmd emulates the docker 29 CLI (as on OrbStack); podman shares it
 // except for `info`.
@@ -82,6 +104,15 @@ func (f *fake) dockerDown() error {
 	return nil
 }
 
+// dockerOS is `info`'s OperatingSystem: OrbStack unless ZOO_FAKE_DOCKER_OS
+// says otherwise (e.g. "Ubuntu 24.04.1 LTS" for Docker Engine on Linux).
+func dockerOS() string {
+	if v := os.Getenv("ZOO_FAKE_DOCKER_OS"); v != "" {
+		return v
+	}
+	return "OrbStack"
+}
+
 func dockerRuntime(def string) string {
 	if r := os.Getenv("ZOO_FAKE_DOCKER_RUNTIME"); r != "" {
 		return r
@@ -101,8 +132,17 @@ func (f *fake) dockerInfo(args []string) error {
 		return err
 	}
 	format := p.last("format")
-	if format != "" && format != jsonFormat {
-		return usagef("fake only supports info --format '{{json .}}'")
+	osName := dockerOS()
+	switch format {
+	case "", jsonFormat:
+	case "{{.OperatingSystem}}":
+		if f.dialect == "podman" {
+			return usagef("podman info has no .OperatingSystem (template: can't evaluate field OperatingSystem)")
+		}
+		fmt.Fprintln(f.out, osName)
+		return nil
+	default:
+		return usagef("fake only supports info --format '{{json .}}' and '{{.OperatingSystem}}'")
 	}
 	var v any
 	if f.dialect == "podman" {
@@ -111,11 +151,11 @@ func (f *fake) dockerInfo(args []string) error {
 			"version": map[string]any{"Version": "5.2.0", "APIVersion": "5.2.0"},
 		}
 	} else {
-		v = map[string]any{"ServerVersion": "29.8.2", "OperatingSystem": "OrbStack", "DefaultRuntime": dockerRuntime("runc"),
+		v = map[string]any{"ServerVersion": "29.8.2", "OperatingSystem": osName, "DefaultRuntime": dockerRuntime("runc"),
 			"Runtimes": map[string]any{"runc": map[string]any{"path": "runc"}}}
 	}
 	if format == "" {
-		fmt.Fprintf(f.out, "Server:\n Server Version: 29.8.2\n Default Runtime: %s\n Operating System: OrbStack\n", dockerRuntime("runc"))
+		fmt.Fprintf(f.out, "Server:\n Server Version: 29.8.2\n Default Runtime: %s\n Operating System: %s\n", dockerRuntime("runc"), osName)
 		return nil
 	}
 	return writeJSON(f.out, v)
@@ -178,8 +218,11 @@ func (f *fake) dockerNetwork(args []string) error {
 		if err != nil {
 			return err
 		}
-		if p.has("format") {
-			return usagef("fake doesn't support network inspect --format")
+		format := p.last("format")
+		switch format {
+		case "", jsonFormat, gatewayFormat, "{{.Name}}", "{{.Internal}}":
+		default:
+			return usagef("unsupported network inspect --format %q", format)
 		}
 		if len(pos) == 0 {
 			return usagef("network inspect needs a name")
@@ -192,14 +235,26 @@ func (f *fake) dockerNetwork(args []string) error {
 				missing = append(missing, name)
 				continue
 			}
-			arr = append(arr, map[string]any{
-				"Name": n.Name, "Id": hashID("net/" + n.Name), "Driver": "bridge", "Internal": n.Internal, "Labels": n.Labels,
-				"IPAM": map[string]any{"Config": []any{map[string]any{
-					"Subnet": fmt.Sprintf("192.168.%d.0/24", n.Subnet), "Gateway": fmt.Sprintf("192.168.%d.1", n.Subnet)}}},
-			})
+			v := f.dockerNetJSON(n)
+			switch format {
+			case "":
+				arr = append(arr, v)
+			case jsonFormat:
+				if err := writeJSON(f.out, v); err != nil {
+					return err
+				}
+			case gatewayFormat:
+				fmt.Fprintf(f.out, "192.168.%d.1 \n", n.Subnet)
+			case "{{.Name}}":
+				fmt.Fprintln(f.out, n.Name)
+			case "{{.Internal}}":
+				fmt.Fprintln(f.out, n.Internal)
+			}
 		}
-		if err := dockerJSON(f, arr); err != nil {
-			return err
+		if format == "" {
+			if err := dockerJSON(f, arr); err != nil {
+				return err
+			}
 		}
 		if len(missing) > 0 {
 			return fmt.Errorf("Error response from daemon: network %s not found", missing[0])
@@ -250,6 +305,88 @@ func (f *fake) dockerNetwork(args []string) error {
 			c.IPs[pos[0]], c.LastIPs[pos[0]] = ip, ip
 		}
 		return nil
+	case "disconnect":
+		p, pos, err := parse("network disconnect", defs("-f,--force"), args[1:], false)
+		if err != nil {
+			return err
+		}
+		if len(pos) != 2 {
+			return usagef("network disconnect needs NETWORK CONTAINER")
+		}
+		if f.st.Net(pos[0]) == nil {
+			return fmt.Errorf("Error response from daemon: network %s not found", pos[0])
+		}
+		c := f.st.Find(pos[1])
+		if c == nil {
+			if p.has("force") {
+				return nil
+			}
+			return fmt.Errorf("Error response from daemon: No such container: %s", pos[1])
+		}
+		if !containsStr(c.Networks, pos[0]) {
+			return fmt.Errorf("Error response from daemon: container %s is not connected to network %s", shortID(c), pos[0])
+		}
+		out := c.Networks[:0]
+		for _, n := range c.Networks {
+			if n != pos[0] {
+				out = append(out, n)
+			}
+		}
+		c.Networks = out
+		delete(c.IPs, pos[0])
+		delete(c.LastIPs, pos[0])
+		return nil
+	case "ls", "list":
+		p, pos, err := parse("network ls", defs("-q,--quiet", "-f,--filter=", "--format=", "--no-trunc"), args[1:], false)
+		if err != nil {
+			return err
+		}
+		if len(pos) > 0 {
+			return usagef("network ls takes no arguments")
+		}
+		format := p.last("format")
+		switch format {
+		case "", "{{.Name}}", "{{.ID}}", jsonFormat:
+		default:
+			return usagef("unsupported network ls --format %q", format)
+		}
+		if format == "" && !p.has("quiet") {
+			fmt.Fprintln(f.out, "NETWORK ID     NAME      DRIVER    SCOPE")
+		}
+		for _, n := range f.st.Networks {
+			ok := true
+			for _, flt := range p["filter"] {
+				k, v, _ := strings.Cut(flt, "=")
+				switch k {
+				case "label":
+					lk, lv, hasV := strings.Cut(v, "=")
+					got, has := n.Labels[lk]
+					ok = ok && has && (!hasV || got == lv)
+				case "name":
+					ok = ok && strings.Contains(n.Name, v)
+				default:
+					return usagef("fake doesn't support network filter %q", k)
+				}
+			}
+			if !ok {
+				continue
+			}
+			id := hashID("net/" + n.Name)[:12]
+			switch {
+			case format == "{{.Name}}":
+				fmt.Fprintln(f.out, n.Name)
+			case format == jsonFormat:
+				if err := writeJSON(f.out, map[string]any{"ID": id, "Name": n.Name, "Driver": "bridge", "Scope": "local", "Internal": strconv.FormatBool(n.Internal)}); err != nil {
+					return err
+				}
+			case format == "{{.ID}}" || p.has("quiet"):
+				// --format wins over -q, like docker.
+				fmt.Fprintln(f.out, id)
+			default:
+				fmt.Fprintf(f.out, "%s   %s   bridge   local\n", id, n.Name)
+			}
+		}
+		return nil
 	case "rm":
 		_, pos, err := parse("network rm", defs("-f,--force"), args[1:], false)
 		if err != nil {
@@ -258,6 +395,11 @@ func (f *fake) dockerNetwork(args []string) error {
 		for _, name := range pos {
 			if f.st.Net(name) == nil || name == "bridge" {
 				return fmt.Errorf("Error response from daemon: network %s not found", name)
+			}
+			for _, c := range f.st.Containers {
+				if c.Running && containsStr(c.Networks, name) {
+					return fmt.Errorf("Error response from daemon: error while removing network: network %s has active endpoints (name:%q id:%q)", name, c.Name, shortID(c))
+				}
 			}
 			out := f.st.Networks[:0]
 			for _, n := range f.st.Networks {
@@ -280,7 +422,7 @@ func (f *fake) dockerRun(cmd string, args []string) error {
 	p, pos, err := parse(cmd, defs("-d,--detach", "--name=", "--net,--network=", "--dns=", "--cpus=", "-m,--memory=",
 		"--pids-limit=", "--cap-drop=", "--cap-add=", "--security-opt=", "--restart=", "--runtime=", "-l,--label=",
 		"-e,--env=", "--env-file=", "--mount=", "-v,--volume=", "--read-only", "--tmpfs=", "-u,--user=", "-w,--workdir=",
-		"--rm", "--init", "--entrypoint=", "--hostname="), args, true)
+		"--rm", "--init", "--entrypoint=", "--hostname=", "--add-host="), args, true)
 	if err != nil {
 		return err
 	}
@@ -362,6 +504,16 @@ func (f *fake) dockerRun(cmd string, args []string) error {
 			return fmt.Errorf("docker: invalid restart policy %q", r)
 		}
 		c.Restart = r
+	}
+	for _, h := range p["add-host"] {
+		host, ip, ok := strings.Cut(h, ":")
+		if !ok {
+			host, ip, ok = strings.Cut(h, "=")
+		}
+		if !ok || host == "" || (ip != "host-gateway" && strings.Count(ip, ".") != 3 && !strings.Contains(ip, ":")) {
+			return usagef("invalid argument %q for \"--add-host\" flag: bad format for add-host", h)
+		}
+		c.ExtraHosts = append(c.ExtraHosts, host+":"+ip)
 	}
 	c.Runtime = p.last("runtime")
 	c.User, c.ReadOnlyFS, c.Tmpfs = p.last("user"), p.has("read-only"), p["tmpfs"]
@@ -575,7 +727,7 @@ func (f *fake) dockerInspectJSON(c *fakestate.Container) map[string]any {
 			"PidsLimit": c.PidsLimit, "NanoCpus": int64(math.Round(c.CPUs * 1e9)), "Memory": c.Memory,
 			"CapDrop": c.CapDrop, "CapAdd": c.CapAdd, "SecurityOpt": c.SecurityOpt, "Dns": c.DNS,
 			"Runtime": runtime, "RestartPolicy": map[string]any{"Name": restart}, "ReadonlyRootfs": c.ReadOnlyFS,
-			"NetworkMode": firstNet(c),
+			"NetworkMode": firstNet(c), "ExtraHosts": c.ExtraHosts,
 		},
 		"Mounts":          mounts,
 		"NetworkSettings": map[string]any{"Networks": nets},

@@ -49,6 +49,7 @@ type Capabilities struct {
 	ReadOnlyMounts       bool      `json:"read_only_mounts"`
 	GuestMountCap        bool      `json:"guest_mount_cap"` // guest root can bind/remount (guest-side masking)
 	PidsLimit            bool      `json:"pids_limit"`
+	PerCageNetworks      bool      `json:"per_cage_networks"` // each cage on its own network (no cage-to-cage traffic)
 	DiskLimit            bool      `json:"disk_limit"`
 	PerCageKernel        bool      `json:"per_cage_kernel"`
 }
@@ -77,6 +78,7 @@ type Mount struct {
 // CageSpec is everything a backend needs to create a cage.
 type CageSpec struct {
 	ID       string
+	Network  string // from CageNetwork; "" = the shared cage network
 	Image    string
 	CPUs     int
 	Memory   string // "2G"
@@ -100,6 +102,22 @@ type KeeperSpec struct {
 	Labels map[string]string
 }
 
+// SidecarSpec is a service container zoo runs for cages (postgres, redis…).
+// It sits on the internal services network, which only the keeper joins.
+type SidecarSpec struct {
+	ID     string
+	Image  string
+	Env    []string
+	Mounts []Mount
+	Labels map[string]string
+}
+
+// KeeperID is the keeper instance's name on every backend.
+const KeeperID = "zoo-keeper"
+
+// ServicesNetwork is the internal network for sidecars.
+const ServicesNetwork = "zoo-services"
+
 // ImageSpec is an image build.
 type ImageSpec struct {
 	Tag       string
@@ -113,7 +131,8 @@ type Status struct {
 	State   string            `json:"state"`
 	Running bool              `json:"running"`
 	Labels  map[string]string `json:"labels"`
-	IP      string            `json:"ip"` // address on the cage network
+	IP      string            `json:"ip"`  // address on the cage network
+	IPs     map[string]string `json:"ips"` // network -> address
 }
 
 // ExecSpec runs a command in an instance. Nil Stdin/Stdout/Stderr mean the
@@ -178,6 +197,17 @@ type Backend interface {
 	Exec(ctx context.Context, spec ExecSpec) (int, error)
 	// Sample reads resources for running instances.
 	Sample(ctx context.Context) ([]Sample, error)
+
+	// CageNetwork prepares the network a cage joins and returns it with the
+	// keeper's address there (backends without per-cage networks return the
+	// shared one).
+	CageNetwork(ctx context.Context, cageID string) (network, keeperIP string, err error)
+	// EnsureSidecar creates or starts a sidecar and returns its address on
+	// the services network.
+	EnsureSidecar(ctx context.Context, spec SidecarSpec) (string, error)
+	// HostBridge is where zood's host bridge listens (reachable from the
+	// keeper, not from cages) and the address the keeper dials for it.
+	HostBridge(ctx context.Context) (listen, dial string, err error)
 }
 
 // Options configure a backend instance.

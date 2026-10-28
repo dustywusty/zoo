@@ -743,6 +743,24 @@ Each milestone ends with a **gate**: concrete commands with expected results. A 
 - `zoo gc`. First-seen-host info alerts.
 - **Gate:** two cages, project A allows `api.stripe.com`, project B doesn't → request from B is denied, from A allowed; logs show scope used.
 
+### M2S: Services, grants, SSH agent, secret sources
+
+Owner request (2026-10-28): teach zoo about the things agents need besides web hosts, and say which cage gets what.
+
+- **Service** (config `services:` in `~/.zoo/config.yaml`), one of:
+  - `host: 127.0.0.1:5432`: something on the host. Reached via the **host bridge** (below); nothing on the host needs to bind `0.0.0.0`.
+  - `image: postgres:16` (+ `port`, `env`, `volume`): a **sidecar** zoo runs on the internal `zoo-services` network, which only the keeper joins. Data in `~/.zoo/services/<name>/` when `volume` is set.
+  - `remote: github.com:22`: a non-HTTP destination the keeper dials.
+  - `ssh-agent: <socket path | bitwarden | 1password | system>`: an SSH agent on the host, exposed through zoo's filtering agent proxy (keys, destinations, optional approval).
+- **Grant**: cage → service. Effective grants = repo `zoo.yaml` `services:` ∪ `zoo grant` entries (`~/.zoo/grants.json`). `zoo grant|revoke <cage> <service>`, `zoo service ls`, dashboard Grant/Revoke.
+- **Gate**: a small Go TCP forwarder (`zoo-gate`, stdlib only, built in the keeper image) next to squid. One listener per service on the keeper (the service's port; collisions are config errors; 3128 reserved). Config `/etc/zoo/gate.json` written by the host (services, targets, allowed cage IPs, bridge address and token); the gate reloads on change. Connections from a cage without a grant are refused and logged. Log: `/var/log/zoo/gate.log`, JSON lines `{ts, client, service, target, verdict, bytes_in, bytes_out, ms}`.
+- **Names in the cage**: `/etc/hosts` gets `<service>.zoo → keeper IP` for granted services (written as guest root, which owns the file; the agent user can't edit it). Env hints where conventional (`PGHOST`, `REDIS_URL`). `ssh-agent` services: a relay in the cage puts the socket at `$SSH_AUTH_SOCK=/run/zoo/ssh-agent.sock` per session. `remote` services on port 22 get an `ssh_config` entry with `HostName <svc>.zoo` + `HostKeyAlias <real host>`.
+- **Host bridge** (in zood): listens on an address the keeper can reach and cages can't (apple: the `default` network's host IP, verified; docker: per runtime, verify). Each connection starts with `ZOO1 <token> <service> <cage>\n`; the token is in `gate.json` (host-only, mounted into the keeper only). zood requires the daemon to be running for host and ssh-agent services.
+- **SSH agent proxy** (zood, `internal/sshagent`): lists only the granted keys; signs only for allowed destinations, checked via the `session-bind@openssh.com` host key against known host keys; optional per-use approval on the dashboard; every list/sign logged with cage, key, destination, verdict. Private keys never leave the host agent.
+- **Secret sources** (`internal/keys`): harness/repo env values may name `bw:<item>[/<field>]` (Bitwarden CLI) or `op://vault/item/field` (1Password CLI) besides Keychain items; fetched on the host per session, injected like today. Never expose a vault session to a cage.
+- **Per-cage networks** (docker): each cage gets its own internal network, keeper connected (`network connect`), so cages can't reach each other. Apple can't attach networks to a running instance, so Apple cages keep the shared network (doctor checks lateral reachability and warns).
+- **Gate:** host Postgres granted to cage A and not B → A connects via `pg.zoo`, B is refused and logged; sidecar redis reachable only from granted cages; `ssh -T git@github.com` from a granted cage works through the agent proxy with the key never in the cage, signing for another host is refused; dashboard shows connections and signs.
+
 ### M3: Store, daemon as a service, API v1
 
 - Store (7.3) with retention; backfill from squid logs on first run.
@@ -814,6 +832,11 @@ Append new decisions at the bottom. Format: `D<n> (date): decision — why — a
 - **D14 (2026-10-28): Docker cages keep a writable root filesystem** (parity with Apple), not `--read-only` + tmpfs home: Docker tmpfs mounts are `noexec` by default and the image's pre-seeded agent home would be hidden. Persistence is per cage and cleared by `zoo reset`. Revisit with M5 per-agent homes.
 - **D15 (2026-10-28): Docker keeper sits on zoo's own `zoo-egress` bridge**, not the default `bridge`, so unrelated containers can't use it as a proxy. Keeper keeps CHOWN/SETUID/SETGID/DAC_OVERRIDE/FOWNER (squid drops to `proxy`), everything else dropped.
 - **D17 (2026-10-28): Image tags are versioned (`zoo-cage:m1`, `zoo-keeper:m1`), and instances carry a `zoo.image` label.** On `zoo up` a keeper from another image is replaced (it's stateless); a stopped cage from another image is recreated on its next run; a running one gets a warning to `zoo reset` it. This is how v0 installs pick up the fixed guard and keeper without manual steps. Bump the tag when images or expected mounts change.
+- **D18 (2026-10-28): Services go through a gate in the keeper, not new routes.** The keeper stays the only thing a cage can reach; `zoo-gate` (stdlib Go, built in a multi-stage keeper image) forwards granted services and logs every connection. Rejected: publishing host ports into cages (no grants, no log), socat per service (no per-cage ACL or logging).
+- **D19 (2026-10-28): Host services and SSH agents reach the host through zood's bridge**, bound where only the keeper can connect (Apple: the `default` network's host IP; OrbStack/Desktop: 127.0.0.1 via `host.docker.internal`; Linux: the egress bridge gateway) and authenticated by a token in `gate.json`. Host services can stay on 127.0.0.1.
+- **D20 (2026-10-28): Sidecars live on an internal `zoo-services` network only the keeper joins**, so grants are enforced by the gate even on Apple, where cages share a network.
+- **D21 (2026-10-28): The gate runs unprivileged; service ports below 1024 move up by 20000** (github.com:22 → 20022, with an ssh_config entry so `git@github.com:` works unchanged).
+- **D22 (2026-10-28): The SSH agent proxy refuses signs with no `session-bind` when a service restricts hosts.** Means OpenSSH ≥ 8.9 in the cage (Debian bookworm has 9.2) and no commit signing on host-restricted keys; unrestricted keys still sign. Every list/sign is logged; private keys never leave the host agent.
 - **D16 (2026-10-28): `zoo up --backend X --isolation-floor Y` is remembered in `~/.zoo/state.json`** so later commands and the daemon agree; a plain `zoo up` clears the remembered floor. Precedence: flag > env (`ZOO_BACKEND`, `ZOO_ISOLATION_FLOOR`) > config `backend` (non-auto) > remembered > auto; floor: flag > env > remembered > config.
 
 ---
@@ -925,6 +948,17 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 - [ ] First-seen alerts
 - [ ] Gate
 
+**M2S: Services, grants, SSH agent, secret sources**
+- [x] Services config + grants (CLI, zoo.yaml, grants.json)
+- [x] Gate in keeper image + gate.json sync + gate log ingest
+- [x] Host bridge in zood (apple: verified keeper-only reachability; docker/OrbStack: e2e)
+- [x] Sidecars on `zoo-services`
+- [x] SSH agent proxy (key scoping, destination check, approval, logging); tested with real OpenSSH
+- [x] Secret sources: Bitwarden CLI, 1Password CLI (tested against fake CLIs; owner has neither CLI installed)
+- [x] Per-cage networks on docker (lateral traffic: "Network is unreachable")
+- [x] Dashboard: services, grants, connections, signs, approvals; minimal visual refresh
+- [ ] Gate: passes on OrbStack (host service, sidecar, github.com:22, agent filtering, approvals, ungranted cage refused); Apple run pending
+
 **M3: Store, service, API v1**
 - [ ] Store + retention + backfill
 - [ ] launchd/systemd service
@@ -979,6 +1013,7 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 
 - 2026-10-28: v0 built (Apple backend, squid keeper, daemon, static dashboard, doctor, shims). Tested against a fake `container` CLI.
 - 2026-10-28: M0 verified on container 1.6.1. Fixed: in-guest masks/git guard silently failed (no CAP_SYS_ADMIN); squid -k reconfigure failed (squid was PID 1); `.git` rename bypassed the git guard; linked-worktree `.git` file and `commondir` were writable; IP-keyed learn mode leaked across cages on IP reuse; squid matched IP-literal CONNECTs by PTR name (now `dstdomain -n`).
+- 2026-10-28: M2S: services (host, sidecar, remote, ssh-agent), grants, gate, host bridge, SSH agent proxy, Bitwarden/1Password secret sources, per-cage networks on docker, dashboard refresh. Fixed: squid stale pid file wedged keeper restarts.
 - 2026-10-28: M1: `internal/backend` with `apple`, `docker`, `podman`; host-side guard on all backends; isolation floor; `zoo backend`, `zoo status`; escape suite PASS on OrbStack and Apple.
 
 ---

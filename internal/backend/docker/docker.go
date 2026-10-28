@@ -78,6 +78,7 @@ func (d *Docker) Detect(ctx context.Context) backend.Info {
 			HostFileMounts:     true,
 			ReadOnlyMounts:     true,
 			PidsLimit:          true,
+			PerCageNetworks:    true,
 		},
 	}
 	if d.name == "podman" {
@@ -159,7 +160,49 @@ func (d *Docker) ensureNet(ctx context.Context, name string, internal bool) erro
 }
 
 func (d *Docker) EnsureNetwork(ctx context.Context) error {
-	return d.ensureNet(ctx, d.network, true)
+	if err := d.ensureNet(ctx, d.network, true); err != nil {
+		return err
+	}
+	return d.ensureNet(ctx, backend.ServicesNetwork, true)
+}
+
+// cageNet is a cage's own network.
+func (d *Docker) cageNet(cageID string) string {
+	return d.network + "-" + strings.TrimPrefix(cageID, "zoo-")
+}
+
+// connectKeeper attaches the keeper to a network unless it already is.
+func (d *Docker) connectKeeper(ctx context.Context, keeperID, network string) (string, error) {
+	st, ok, err := d.Get(ctx, keeperID)
+	if err != nil || !ok {
+		return "", fmt.Errorf("keeper %s not found: %v", keeperID, err)
+	}
+	if ip := st.IPs[network]; ip != "" {
+		return ip, nil
+	}
+	if _, err := d.cli.Run(ctx, "network", "connect", network, keeperID); err != nil {
+		return "", err
+	}
+	st, _, err = d.Get(ctx, keeperID)
+	if err != nil || st.IPs[network] == "" {
+		return "", fmt.Errorf("keeper has no address on %s", network)
+	}
+	return st.IPs[network], nil
+}
+
+// CageNetwork gives each cage its own internal network with the keeper on
+// it, so cages can't reach each other. If the runtime runs out of address
+// space it falls back to the shared network.
+func (d *Docker) CageNetwork(ctx context.Context, cageID string) (string, string, error) {
+	n := d.cageNet(cageID)
+	if !d.cli.OK(ctx, "network", "inspect", n) {
+		if _, err := d.cli.Run(ctx, "network", "create", "--internal", "--label", "zoo=1", "--label", "zoo.cage-net="+cageID, n); err != nil {
+			fmt.Fprintf(os.Stderr, "zoo: couldn't create a network for %s (%v); it shares %s with other cages\n", cageID, err, d.network)
+			n = d.network
+		}
+	}
+	ip, err := d.connectKeeper(ctx, backend.KeeperID, n)
+	return n, ip, err
 }
 
 func labelArgs(labels map[string]string) []string {
@@ -197,9 +240,20 @@ func (d *Docker) EnsureKeeper(ctx context.Context, s backend.KeeperSpec) (string
 			exists = false
 		}
 	}
+	if exists {
+		// Rejoin cage networks created while the keeper was down.
+		if out, err := d.cli.Run(ctx, "network", "ls", "-q", "--filter", "label=zoo.cage-net", "--format", "{{.Name}}"); err == nil {
+			for _, n := range strings.Fields(out) {
+				_, _ = d.connectKeeper(ctx, s.ID, n)
+			}
+		}
+	}
 	if !exists {
 		args := []string{"create", "--name", s.ID,
 			"--network", EgressNetwork,
+			// Where zood's host bridge is (Linux needs this mapping; Desktop
+			// and OrbStack provide it anyway).
+			"--add-host", "host.docker.internal:host-gateway",
 			"--cpus", fmt.Sprint(s.CPUs), "--memory", s.Memory,
 			"--pids-limit", "512",
 			// squid starts as root to set up its dirs, then runs as "proxy".
@@ -217,9 +271,16 @@ func (d *Docker) EnsureKeeper(ctx context.Context, s backend.KeeperSpec) (string
 		if _, err := d.cli.Run(ctx, args...); err != nil {
 			return "", fmt.Errorf("create keeper: %w", err)
 		}
-		if _, err := d.cli.Run(ctx, "network", "connect", d.network, s.ID); err != nil {
-			_ = d.Delete(ctx, s.ID)
-			return "", fmt.Errorf("attach keeper to %s: %w", d.network, err)
+		nets := []string{d.network, backend.ServicesNetwork}
+		// A replaced keeper rejoins every cage's own network.
+		if out, err := d.cli.Run(ctx, "network", "ls", "-q", "--filter", "label=zoo.cage-net", "--format", "{{.Name}}"); err == nil {
+			nets = append(nets, strings.Fields(out)...)
+		}
+		for _, n := range nets {
+			if _, err := d.cli.Run(ctx, "network", "connect", n, s.ID); err != nil {
+				_ = d.Delete(ctx, s.ID)
+				return "", fmt.Errorf("attach keeper to %s: %w", n, err)
+			}
 		}
 		if err := d.Start(ctx, s.ID); err != nil {
 			return "", fmt.Errorf("start keeper: %w", err)
@@ -253,7 +314,7 @@ func (d *Docker) RunArgs(s backend.CageSpec) []string {
 	}
 	args := []string{"run", "-d",
 		"--name", s.ID,
-		"--network", d.network,
+		"--network", or(s.Network, d.network),
 		// Docker's embedded resolver still answers on internal networks and
 		// forwards upstream; point it at nothing so external names never resolve.
 		"--dns", "127.0.0.1",
@@ -317,8 +378,22 @@ func (d *Docker) Stop(ctx context.Context, id string) error {
 }
 
 func (d *Docker) Delete(ctx context.Context, id string) error {
-	_, err := d.cli.Run(ctx, "rm", "-f", id)
-	return err
+	if _, err := d.cli.Run(ctx, "rm", "-f", id); err != nil {
+		return err
+	}
+	// Drop the cage's own network, if it had one.
+	if n := d.cageNet(id); id != backend.KeeperID && d.cli.OK(ctx, "network", "inspect", n) {
+		_, _ = d.cli.Run(ctx, "network", "disconnect", "-f", n, backend.KeeperID)
+		_, _ = d.cli.Run(ctx, "network", "rm", n)
+	}
+	return nil
+}
+
+func or(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 // inspected is the part of `container inspect` zoo reads (same in podman).
@@ -348,8 +423,22 @@ func (d *Docker) toStatus(in inspected) backend.Status {
 	if st.Labels == nil {
 		st.Labels = map[string]string{}
 	}
-	if n, ok := in.NetworkSettings.Networks[d.network]; ok {
-		st.IP = n.IPAddress
+	st.IPs = map[string]string{}
+	for name, n := range in.NetworkSettings.Networks {
+		if n.IPAddress != "" {
+			st.IPs[name] = n.IPAddress
+		}
+	}
+	// A cage's address is on the shared cage network or its own one.
+	if ip := st.IPs[d.network]; ip != "" {
+		st.IP = ip
+	} else {
+		for name, ip := range st.IPs {
+			if strings.HasPrefix(name, d.network+"-") {
+				st.IP = ip
+				break
+			}
+		}
 	}
 	return st
 }
@@ -402,6 +491,64 @@ func (d *Docker) Get(ctx context.Context, id string) (backend.Status, bool, erro
 		return backend.Status{}, false, err
 	}
 	return backend.Status{}, false, nil
+}
+
+func (d *Docker) EnsureSidecar(ctx context.Context, s backend.SidecarSpec) (string, error) {
+	st, exists, err := d.Get(ctx, s.ID)
+	if err != nil {
+		return "", err
+	}
+	if exists && !st.Running {
+		if err := d.Start(ctx, s.ID); err != nil {
+			return "", err
+		}
+	}
+	if !exists {
+		args := []string{"run", "-d", "--name", s.ID, "--network", backend.ServicesNetwork,
+			"--dns", "127.0.0.1", "--security-opt", "no-new-privileges", "--pids-limit", "512",
+			"--restart", "unless-stopped"}
+		args = append(args, labelArgs(s.Labels)...)
+		for _, e := range s.Env {
+			args = append(args, "--env", e)
+		}
+		for _, m := range s.Mounts {
+			args = append(args, "--mount", mountArg(m.Source, m.Target, m.ReadOnly))
+		}
+		if _, err := d.cli.Run(ctx, append(args, s.Image)...); err != nil && !alreadyExists(err) {
+			// (The daemon and the CLI may race to create it; the loser is fine.)
+			return "", fmt.Errorf("start sidecar %s: %w", s.ID, err)
+		}
+	}
+	for i := 0; i < 40; i++ {
+		if st, ok, _ := d.Get(ctx, s.ID); ok && st.IPs[backend.ServicesNetwork] != "" {
+			return st.IPs[backend.ServicesNetwork], nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return "", fmt.Errorf("sidecar %s has no address on %s", s.ID, backend.ServicesNetwork)
+}
+
+// HostBridge: Docker Desktop, OrbStack and podman machine route
+// host.docker.internal / host.containers.internal to the Mac's loopback
+// (verified on OrbStack; cages, on internal networks, can't resolve or reach
+// it). On Linux the keeper reaches the host at its egress bridge's gateway.
+func (d *Docker) HostBridge(ctx context.Context) (string, string, error) {
+	if d.name == "podman" {
+		return "127.0.0.1", "host.containers.internal", nil
+	}
+	osName, _ := d.cli.Run(ctx, "info", "--format", "{{.OperatingSystem}}")
+	if strings.Contains(osName, "OrbStack") || strings.Contains(osName, "Docker Desktop") {
+		return "127.0.0.1", "host.docker.internal", nil
+	}
+	gw, err := d.cli.Run(ctx, "network", "inspect", EgressNetwork, "--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}")
+	if err != nil {
+		return "", "", err
+	}
+	f := strings.Fields(gw)
+	if len(f) == 0 {
+		return "", "", fmt.Errorf("no gateway on %s", EgressNetwork)
+	}
+	return f[0], f[0], nil
 }
 
 func (d *Docker) Exec(ctx context.Context, s backend.ExecSpec) (int, error) {
@@ -517,4 +664,9 @@ func ParseBytes(s string) (float64, bool) {
 		return 0, false
 	}
 	return n * m, true
+}
+
+func alreadyExists(err error) bool {
+	m := strings.ToLower(err.Error())
+	return strings.Contains(m, "already in use") || strings.Contains(m, "already exists") || strings.Contains(m, "conflict")
 }

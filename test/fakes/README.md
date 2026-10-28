@@ -36,6 +36,7 @@ Knobs:
 |---|---|
 | `ZOO_FAKE_DOWN=1` | the runtime isn't running (`system status` / `info` fail) |
 | `ZOO_FAKE_DOCKER_RUNTIME=kata` | docker `DefaultRuntime` (podman `ociRuntime.name`); default `runc` / `crun` |
+| `ZOO_FAKE_DOCKER_OS="Ubuntu 24.04.1 LTS"` | docker `info` OperatingSystem; default `OrbStack` (the `zoo-egress` gateway is 192.168.107.1) |
 
 Delete the state file to start over. The contract suite in
 `internal/backend/contract` builds the fake and runs every backend against it.

@@ -34,6 +34,7 @@ import (
 	"github.com/dusty/zoo/internal/keeper"
 	"github.com/dusty/zoo/internal/keys"
 	"github.com/dusty/zoo/internal/paths"
+	"github.com/dusty/zoo/internal/services"
 	"github.com/dusty/zoo/internal/shims"
 )
 
@@ -65,6 +66,9 @@ Usage:
   zoo build [cage|keeper]        (re)build images
   zoo backend [list|use <name>]  show runtimes and their isolation; pick one (apple, docker, podman, auto)
   zoo status                     backend, keeper, daemon, isolation, shims
+  zoo service ls                 services cages can be granted (config: services:)
+  zoo grant <cage> <service>     let a cage reach a service (as <service>.zoo)
+  zoo revoke <cage> <service>    take it back
   zoo version
 
 Global flags (any command):
@@ -127,6 +131,10 @@ func main() {
 		err = cmdBackend(args)
 	case "status":
 		err = cmdStatus()
+	case "service", "services":
+		err = cmdService(args)
+	case "grant", "revoke":
+		err = cmdGrant(cmd, args)
 	case "version", "--version", "-v":
 		fmt.Println("zoo", version)
 	case "help", "--help", "-h":
@@ -498,12 +506,26 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 		say("WARNING: %s runs with %s isolation, below your floor (%s), because of --allow-weaker-isolation", pl.Name, e.info.Caps.Isolation, e.floor)
 	}
 	spec := pl.Spec(e.g, ip, labels)
-	if st, ok, _ := e.b.Get(ctx, pl.ID); ok && st.Running && cage.Stale(st, spec) {
+	st, exists, _ := e.b.Get(ctx, pl.ID)
+	if exists && st.Running && cage.Stale(st, spec) {
 		say("WARNING: %s was created by an older zoo; its secret masks and git guard may not hold. Stop the agents in it, then `zoo reset %s`", pl.Name, pl.Name)
+	}
+	if !exists || (!st.Running && cage.Stale(st, spec)) {
+		// A new cage gets its own network where the backend supports it.
+		network, kip, err := e.b.CageNetwork(ctx, pl.ID)
+		if err != nil {
+			return pl, ip, fmt.Errorf("cage network: %w", err)
+		}
+		ip = kip
+		spec = pl.Spec(e.g, ip, labels)
+		spec.Network = network
 	}
 	created, err := cage.Ensure(ctx, e.b, spec)
 	if err != nil {
 		return pl, ip, err
+	}
+	if kip := keeperIPFor(ctx, e, pl.ID); kip != "" {
+		ip = kip
 	}
 	if created {
 		say("cage %s up on %s (%s: %d CPU, %s, %s isolation) for %s", pl.Name, e.b.Name(), pl.SizeName, pl.Size.CPUs, pl.Size.Memory, e.info.Caps.Isolation, pl.Root)
@@ -511,8 +533,36 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 			say("hiding %d secret file(s) inside the cage", len(pl.Masks))
 		}
 	}
-	syncLearn(ctx, e)
+	syncKeeper(ctx, e)
+	if err := applyServices(ctx, e, pl.Name, pl.ID, ip); err != nil {
+		say("services: %v", err)
+	}
 	return pl, ip, nil
+}
+
+// keeperIPFor is the keeper's address on a network the cage is on.
+func keeperIPFor(ctx context.Context, e env, cageID string) string {
+	c, ok, _ := e.b.Get(ctx, cageID)
+	k, kok, _ := e.b.Get(ctx, keeper.Name)
+	if !ok || !kok {
+		return ""
+	}
+	for n := range c.IPs {
+		if ip := k.IPs[n]; ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
+// applyServices writes a cage's granted service names into it.
+func applyServices(ctx context.Context, e env, name, id, keeperIP string) error {
+	cs, err := cage.List(ctx, e.b)
+	if err != nil {
+		return err
+	}
+	grants := services.GrantsFor(e.g, cs)
+	return services.Apply(ctx, e.b, e.g, id, keeperIP, grants[name])
 }
 
 func weakerErr(e env) error {
@@ -525,8 +575,9 @@ or pass --allow-weaker-isolation for one run, or use a stronger backend (zoo bac
 		e.info.Caps.Isolation, paths.Config())
 }
 
-// syncLearn re-renders squid's learn ACL from running cages' current IPs.
-func syncLearn(ctx context.Context, e env) {
+// syncKeeper re-renders squid's learn ACL and the gate's grants from the
+// cages' current IPs, and starts granted sidecars.
+func syncKeeper(ctx context.Context, e env) {
 	cs, err := cage.List(ctx, e.b)
 	if err != nil {
 		return
@@ -539,6 +590,9 @@ func syncLearn(ctx context.Context, e env) {
 	}
 	if changed, err := keeper.SyncLearn(running); err == nil && changed {
 		reloadIfUp(ctx, e)
+	}
+	if _, err := services.Sync(ctx, e.b, e.g, cs); err != nil {
+		say("services: %v", err)
 	}
 }
 
@@ -572,7 +626,7 @@ func runIn(o runOpts, cageName string) error {
 	}
 	if o.learn {
 		if err := keeper.SetLearn(pl.Name, true); err == nil {
-			syncLearn(ctx, e)
+			syncKeeper(ctx, e)
 			say("learn mode ON for %s: all egress allowed and logged. `zoo learned` to review, `zoo learn off` to end", pl.Name)
 		}
 	}
@@ -581,11 +635,16 @@ func runIn(o runOpts, cageName string) error {
 		"HOME=/home/agent", "USER=agent", "ZOO_CAGE=" + pl.Name, "ZOO_INSIDE=1",
 		"TERM=" + envOr("TERM", "xterm-256color"), "COLORTERM=" + os.Getenv("COLORTERM"), "LANG=" + envOr("LANG", "en_US.UTF-8"),
 	}, cage.ProxyEnv(ip)...)
+	if cs, err := cage.List(ctx, e.b); err == nil {
+		env = append(env, services.SessionEnv(e.g, services.GrantsFor(e.g, cs)[pl.Name])...)
+	}
 	var missing []string
 	for envName, item := range h.Env {
-		v, err := keys.Get(item)
+		// Keychain item, or a vault reference (bw:…, op://…) fetched on this
+		// machine; the vault session itself never enters the cage.
+		v, err := keys.Resolve(item)
 		if err != nil {
-			say("keychain %s: %v", item, err)
+			say("%s: %v", item, err)
 		}
 		if v == "" {
 			missing = append(missing, item)
@@ -594,7 +653,10 @@ func runIn(o runOpts, cageName string) error {
 		env = append(env, envName+"="+v)
 	}
 	for rel, item := range h.Files {
-		v, _ := keys.Get(item)
+		v, err := keys.Resolve(item)
+		if err != nil {
+			say("%s: %v", item, err)
+		}
 		if v == "" {
 			continue
 		}
@@ -628,7 +690,7 @@ func runIn(o runOpts, cageName string) error {
 	}
 
 	spec := backend.ExecSpec{
-		ID: pl.ID, Cmd: append([]string{h.Command}, o.rest...),
+		ID: pl.ID, Cmd: append([]string{"/usr/local/bin/zoo-session", h.Command}, o.rest...),
 		User: "agent", Workdir: workdir, EnvFile: envFile,
 		TTY: isTerminal(os.Stdin) && isTerminal(os.Stdout),
 	}
@@ -654,7 +716,7 @@ func (c exitCode) Error() string { return fmt.Sprintf("exit status %d", int(c)) 
 
 func anyKey(files map[string]string) bool {
 	for _, item := range files {
-		if keys.Has(item) {
+		if ok, _ := keys.Available(item); ok {
 			return true
 		}
 	}
@@ -803,7 +865,7 @@ func cmdStop(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer syncLearn(ctx, e)
+	defer syncKeeper(ctx, e)
 	if args[0] == "all" {
 		cs, err := cage.List(ctx, e.b)
 		if err != nil {
@@ -849,7 +911,7 @@ func cmdReset(args []string) error {
 	if err := e.b.Delete(ctx, c.ID); err != nil {
 		return err
 	}
-	syncLearn(ctx, e)
+	syncKeeper(ctx, e)
 	say("reset %s; the next `zoo run` there starts from a clean image", c.Name)
 	return nil
 }
@@ -960,7 +1022,7 @@ func cmdLearn(args []string) error {
 	if err := keeper.SetLearn(c.Name, args[0] == "on"); err != nil {
 		return err
 	}
-	syncLearn(ctx, e)
+	syncKeeper(ctx, e)
 	if args[0] == "on" && !c.Running {
 		say("%s isn't running; learn mode starts with its next run", c.Name)
 	}
@@ -1040,7 +1102,16 @@ func cmdKeys(args []string) error {
 	case "ls":
 		seen := map[string]bool{}
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "ITEM\tSTORED\tUSED BY")
+		fmt.Fprintln(tw, "ITEM\tSOURCE\tAVAILABLE\tUSED BY")
+		row := func(item, usedBy string) {
+			src, name := keys.Describe(item)
+			ok, hint := keys.Available(item)
+			avail := "yes"
+			if !ok {
+				avail = "no: " + hint
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, src, avail, usedBy)
+		}
 		names := make([]string, 0, len(g.Harnesses))
 		for n := range g.Harnesses {
 			names = append(names, n)
@@ -1051,13 +1122,13 @@ func cmdKeys(args []string) error {
 			for envName, item := range h.Env {
 				if !seen[item] {
 					seen[item] = true
-					fmt.Fprintf(tw, "%s\t%v\t%s ($%s)\n", item, keys.Has(item), n, envName)
+					row(item, fmt.Sprintf("%s ($%s)", n, envName))
 				}
 			}
 			for rel, item := range h.Files {
 				if !seen[item] {
 					seen[item] = true
-					fmt.Fprintf(tw, "%s\t%v\t%s (~/%s)\n", item, keys.Has(item), n, rel)
+					row(item, fmt.Sprintf("%s (~/%s)", n, rel))
 				}
 			}
 		}
@@ -1065,6 +1136,9 @@ func cmdKeys(args []string) error {
 	case "set":
 		if len(args) != 2 {
 			return errors.New("usage: zoo keys set <name>   (value from stdin if piped, otherwise prompted)")
+		}
+		if src, _ := keys.Describe(args[1]); src != "keychain" {
+			return fmt.Errorf("%s lives in %s; zoo reads it from there and never stores it", args[1], src)
 		}
 		if !isTerminal(os.Stdin) {
 			b, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))

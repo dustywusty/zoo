@@ -25,7 +25,7 @@ import (
 	"github.com/dusty/zoo/internal/paths"
 )
 
-const Name = "zoo-keeper"
+const Name = backend.KeeperID
 const Port = 3128
 
 // DefaultAllowlist is what a fresh install allows. A leading dot means the
@@ -100,6 +100,11 @@ func EnsureFiles() error {
 	}
 	if _, err := os.Stat(paths.Allowlist()); os.IsNotExist(err) {
 		if err := os.WriteFile(paths.Allowlist(), []byte(strings.Join(DefaultAllowlist, "\n")+"\n"), 0o644); err != nil {
+			return err
+		}
+	}
+	if _, err := os.Stat(paths.GateConf()); os.IsNotExist(err) {
+		if err := os.WriteFile(paths.GateConf(), []byte("{\"services\": []}\n"), 0o644); err != nil {
 			return err
 		}
 	}

@@ -319,6 +319,7 @@ type Info struct {
 	IP        string `json:"ip"`
 	Isolation string `json:"isolation"`
 	Weaker    bool   `json:"weaker_isolation"` // started below the isolation floor
+	Network   string `json:"network"`
 }
 
 // List returns all zoo cages.
@@ -329,8 +330,14 @@ func List(ctx context.Context, b backend.Backend) ([]Info, error) {
 	}
 	var out []Info
 	for _, c := range all {
-		if c.ID == keeper.Name || c.Labels["zoo.role"] == "keeper" {
+		if c.ID == keeper.Name || c.Labels["zoo.role"] == "keeper" || c.Labels["zoo.role"] == "service" || strings.HasPrefix(c.ID, "zoo-svc-") {
 			continue
+		}
+		network := ""
+		for n, ip := range c.IPs {
+			if ip == c.IP {
+				network = n
+			}
 		}
 		name := c.Labels[LabelCage]
 		if name == "" {
@@ -344,6 +351,7 @@ func List(ctx context.Context, b backend.Backend) ([]Info, error) {
 			Size: c.Labels[LabelSize], CPUs: c.Labels[LabelCPUs], Memory: c.Labels[LabelMemory],
 			Status: c.State, Running: c.Running, IP: c.IP,
 			Isolation: c.Labels[LabelIso], Weaker: c.Labels[LabelWeaker] == "1",
+			Network: network,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

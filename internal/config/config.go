@@ -49,6 +49,26 @@ type Global struct {
 	// sandboxed-container | container. Docker with runc is "container".
 	IsolationFloor string `yaml:"isolation_floor"`
 	Docker         Docker `yaml:"docker"`
+
+	// Services are things cages may be granted besides web hosts.
+	Services map[string]Service `yaml:"services"`
+}
+
+// Service is a host port, a sidecar, a remote TCP destination or an SSH
+// agent that cages reach through the keeper's gate once granted. Exactly
+// one of Host, Image, Remote, SSHAgent is set.
+type Service struct {
+	Host     string            `yaml:"host" json:"host,omitempty"`           // "127.0.0.1:5432" on this machine
+	Image    string            `yaml:"image" json:"image,omitempty"`         // sidecar image, e.g. postgres:16
+	Remote   string            `yaml:"remote" json:"remote,omitempty"`       // "github.com:22"
+	SSHAgent string            `yaml:"ssh-agent" json:"ssh_agent,omitempty"` // bitwarden | 1password | system | socket path
+	Port     int               `yaml:"port" json:"port,omitempty"`           // port cages use (default: the target's)
+	Env      map[string]string `yaml:"env" json:"env,omitempty"`             // sidecar env (values may be secret refs)
+	Volume   string            `yaml:"volume" json:"volume,omitempty"`       // sidecar data dir, kept in ~/.zoo/services/<name>
+	Keys     []string          `yaml:"keys" json:"keys,omitempty"`           // ssh-agent: allowed key fingerprints or comments
+	Hosts    []string          `yaml:"hosts" json:"hosts,omitempty"`         // ssh-agent: allowed destinations
+	Approve  bool              `yaml:"approve" json:"approve,omitempty"`     // ssh-agent: ask on the dashboard before each use
+	CageEnv  map[string]string `yaml:"cage_env" json:"cage_env,omitempty"`   // env for granted cages; {host} and {port} expand
 }
 
 // Docker configures the docker/podman backend.
@@ -59,10 +79,11 @@ type Docker struct {
 
 // Project is zoo.yaml at a worktree root. Everything is optional.
 type Project struct {
-	Size    string   `yaml:"size"`
-	Harness string   `yaml:"harness"`
-	Mask    []string `yaml:"mask"`
-	Unmask  []string `yaml:"unmask"`
+	Size     string   `yaml:"size"`
+	Harness  string   `yaml:"harness"`
+	Mask     []string `yaml:"mask"`
+	Unmask   []string `yaml:"unmask"`
+	Services []string `yaml:"services"` // services granted to this repo's cage
 }
 
 func Defaults() Global {
@@ -85,8 +106,8 @@ func Defaults() Global {
 		BytesOutAlert: 5 << 20,
 		// Bump the tag when the images or the mounts they expect change:
 		// zoo rebuilds missing images and replaces instances on an old tag.
-		CageImage:      "zoo-cage:m1",
-		KeeperImage:    "zoo-keeper:m1",
+		CageImage:      "zoo-cage:m2",
+		KeeperImage:    "zoo-keeper:m2",
 		Network:        "zoo-cages",
 		Backend:        "auto",
 		IsolationFloor: "microvm",
@@ -156,6 +177,12 @@ func merge(g *Global, f Global) {
 	}
 	if f.Docker.Runtime != "" {
 		g.Docker.Runtime = f.Docker.Runtime
+	}
+	if g.Services == nil {
+		g.Services = map[string]Service{}
+	}
+	for k, v := range f.Services {
+		g.Services[k] = v
 	}
 }
 
@@ -227,6 +254,11 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 # unmask: [".env.example", ".env.sample", ".env.template", "*.pub"]
 # bytes_out_alert: 5242880   # alert when one cage sends this much to one host
 # ntfy_url: https://ntfy.sh/your-private-topic
+# services:                  # things cages can be granted (zoo grant <cage> <service>)
+#   pg:     { host: 127.0.0.1:5432 }                  # on this machine; reached as pg.zoo:5432
+#   redis:  { image: redis:7, port: 6379 }            # a sidecar zoo runs
+#   gh-ssh: { remote: github.com:22 }                 # non-HTTP egress
+#   keys:   { ssh-agent: bitwarden, keys: [github], hosts: [github.com] }
 # harnesses:
 #   pi:
 #     command: pi

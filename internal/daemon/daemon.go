@@ -90,6 +90,7 @@ type Server struct {
 	nextID    int64
 	subs      map[chan []byte]struct{}
 	lastErr   string
+	svc       *svcState
 }
 
 // Token returns the dashboard token, creating it on first use.
@@ -117,6 +118,7 @@ func New(cfg config.Global, b backend.Backend, floor backend.Isolation) (*Server
 		seen: map[string]map[string]bool{}, sentBytes: map[string]int64{},
 		alerted: map[string]time.Time{}, sessions: map[string]Session{},
 		subs: map[chan []byte]struct{}{},
+		svc:  newSvcState(),
 	}, nil
 }
 
@@ -138,6 +140,8 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.loop(ctx, 5*time.Second, s.refreshAllowlist)
 	go s.loop(ctx, 2*time.Second, s.broadcastState)
 	go s.tail(ctx, start)
+	go s.tailGate(ctx)
+	go s.runBridge(ctx)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.cfg.Port)
 	ln, err := net.Listen("tcp", addr)
@@ -186,6 +190,7 @@ func (s *Server) pollCages() {
 				log.Printf("keeper reload after learn sync: %v", rerr)
 			}
 		}
+		s.syncServices(cs)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -421,6 +426,7 @@ func (s *Server) publish(kind string, v any) {
 
 type cageView struct {
 	cage.Info
+	Grants   []string  `json:"grants"`
 	Stat     *Stat     `json:"stat,omitempty"`
 	Counts   Counts    `json:"counts"`
 	Sessions []Session `json:"sessions"`
@@ -428,12 +434,14 @@ type cageView struct {
 }
 
 type stateView struct {
-	Backend   any        `json:"backend"`
-	Cages     []cageView `json:"cages"`
-	Keeper    any        `json:"keeper"`
-	Allowlist []string   `json:"allowlist"`
-	Error     string     `json:"error,omitempty"`
-	Now       time.Time  `json:"now"`
+	Services  []ServiceView `json:"services"`
+	Pending   []*Pending    `json:"pending"`
+	Backend   any           `json:"backend"`
+	Cages     []cageView    `json:"cages"`
+	Keeper    any           `json:"keeper"`
+	Allowlist []string      `json:"allowlist"`
+	Error     string        `json:"error,omitempty"`
+	Now       time.Time     `json:"now"`
 }
 
 func (s *Server) snapshot() stateView {
@@ -450,8 +458,16 @@ func (s *Server) snapshot() stateView {
 		Error:     s.lastErr,
 		Now:       time.Now().UTC(),
 	}
+	s.svc.mu.Lock()
+	v.Services = append([]ServiceView(nil), s.svc.views...)
+	v.Pending = []*Pending{}
+	for _, p := range s.svc.pending {
+		v.Pending = append(v.Pending, p)
+	}
+	grants := s.svc.grants
+	s.svc.mu.Unlock()
 	for _, c := range s.cages {
-		cv := cageView{Info: c, Learn: c.IP != "" && learn[c.IP]}
+		cv := cageView{Info: c, Learn: c.IP != "" && learn[c.IP], Grants: grants[c.Name]}
 		if st, ok := s.stats[c.ID]; ok {
 			st := st
 			cv.Stat = &st
@@ -482,6 +498,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/allow", s.handleAllow)
 	mux.HandleFunc("POST /api/sessions", s.handleSessionStart)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.handleSessionEnd)
+	mux.HandleFunc("POST /api/grants", s.handleGrant)
+	mux.HandleFunc("DELETE /api/grants", s.handleGrant)
+	mux.HandleFunc("POST /api/pending/{id}", s.handlePending)
 	return s.guard(mux)
 }
 
@@ -527,7 +546,15 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	if len(events) > 1000 {
 		events = events[len(events)-1000:]
 	}
-	writeJSON(w, map[string]any{"state": v, "events": events, "alerts": alerts})
+	s.svc.mu.Lock()
+	conns := append([]ConnEvent(nil), s.svc.conns...)
+	signs := append([]SignEvent(nil), s.svc.signs...)
+	pending := make([]*Pending, 0, len(s.svc.pending))
+	for _, p := range s.svc.pending {
+		pending = append(pending, p)
+	}
+	s.svc.mu.Unlock()
+	writeJSON(w, map[string]any{"state": v, "events": events, "alerts": alerts, "conns": conns, "signs": signs, "pending": pending})
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
