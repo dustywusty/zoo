@@ -940,7 +940,7 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 - [x] Isolation levels, `isolation_floor`, badges (I12)
 - [x] `zoo backend`
 - [x] Contract suite + fakes (`internal/backend/contract`, `test/fakes/fakectr`: apple 1.6.1 and docker 29 dialects, podman via docker dialect)
-- [ ] Linux CI gate (`.github/workflows/ci.yml` written; not run until pushed: `needs-human`)
+- [x] Linux CI gate: GitHub Actions ubuntu-latest, Docker 28; escape suite PASS in main checkout and linked worktree (after D23)
 
 **M2: Allowlist layers, gc, first-seen**
 - [ ] Per-cage squid ACLs from global ∪ harness ∪ project
