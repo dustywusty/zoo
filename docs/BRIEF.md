@@ -173,7 +173,7 @@ assets/
 internal/
   paths/    ~/.zoo layout (ZOO_HOME overrides)
   config/   ~/.zoo/config.yaml (global) + zoo.yaml (per repo); sizes; harness table
-  ctr/      Apple `container` CLI wrapper (ZOO_CONTAINER_BIN overrides for tests)
+  backend/  Backend interface; apple/ (container CLI, ZOO_CONTAINER_BIN), docker/ (docker|podman, ZOO_DOCKER_BIN)
   jsonx/    tolerant JSON digging (container CLI JSON isn't a stable contract)
   cage/     plan (worktree root, git dirs, masks, read-only paths, size), run args, ensure, list, find
   keeper/   squid.conf, allowlist (normalize/allow/deny/prune), learn list, keeper VM up/reload, log parsing
@@ -200,6 +200,9 @@ Makefile                   build / test / install / dist (darwin/arm64)
 - `shellcheck` on in-image scripts; JS syntax check of the dashboard.
 
 ### 6.4 Not yet verified on real hardware (M0 must verify)
+
+**Status (2026-10-28, container 1.6.1 on macOS 27.0.1):** two networks via repeated `--network` ✓; `exec --env-file` ✓ (quotes kept literally) and exec inherits `run -e` ✓; in-guest bind/remount ✗ (no CAP_SYS_ADMIN: replaced by host-side mounts, D11); virtiofs ownership ✓ (guest sees root:root and doesn't enforce modes, host sees your uid); stats fields ✓ (`cpuUsageUsec` cumulative µs, `memoryUsageBytes`, `memoryLimitBytes`, `networkRxBytes`, `networkTxBytes`, `blockReadBytes`, `blockWriteBytes`, `numProcesses`); `build --build-arg` ✓; squid writes the virtiofs log dir ✓; harnesses honoring `HTTPS_PROXY` (not yet: needs tokens). Also learned: IPs change on restart; no `--pids-limit` (use `--ulimit nproc`); `image inspect` works for existence; `-u nosuchuser` leaves a stale exec record that blocks `delete --force` until `stop`.
+
 
 - Keeper joining two networks via repeated `--network`.
 - `container exec --env-file` behavior and env inheritance from `run -e`.
@@ -805,6 +808,12 @@ Append new decisions at the bottom. Format: `D<n> (date): decision — why — a
 - **D8 (2026-10-28): v0 dashboard is a single embedded static page.** Owner wanted something usable same day; React later.
 - **D9 (2026-10-28): Agents commit, humans push (default).** Single-repo push tokens are opt-in per project. (Owner asked to confirm; open in 18.)
 - **D10 (2026-10-28): Docker backend uses host-side masking.** Lets cages run with `--cap-drop ALL`; guest-side masking reserved for VM backends without file mounts.
+- **D11 (2026-10-28): Apple uses host-side masking too, and cages drop all capabilities.** Verified on 1.6.1: the guest root has Docker's default capability set (no CAP_SYS_ADMIN), so v0's in-guest bind mounts failed; `-v file:path:ro` works (`--mount` rejects files). A file `-v` shares its parent directory with the guest, reachable only with CAP_SYS_ADMIN, so the mask file lives alone in `~/.zoo/mask/`. Rejected: `--cap-add CAP_SYS_ADMIN` for zoo-init (gives the guest the power to undo the masks).
+- **D12 (2026-10-28): Pin directories that hold protected paths.** Every directory between a mount root and a read-only path is mounted onto itself, because a rename carries nested read-only mounts away (`mv .git .git2`, then write a fresh `.git/config` the host runs). On Apple a directory mount is dropped when the same directory is the parent of a file mount, so read-only files inside pinned directories are mounted from a staged copy under `~/.zoo/stage/<cage>/` (host edits visible after `zoo reset`). Rejected: making `.git` wholly read-only (agents must commit).
+- **D13 (2026-10-28): Learn mode is keyed by cage name**, rendered into squid's src ACL from current IPs on every cage start/stop and daemon poll. Apple reassigns IPs on restart.
+- **D14 (2026-10-28): Docker cages keep a writable root filesystem** (parity with Apple), not `--read-only` + tmpfs home: Docker tmpfs mounts are `noexec` by default and the image's pre-seeded agent home would be hidden. Persistence is per cage and cleared by `zoo reset`. Revisit with M5 per-agent homes.
+- **D15 (2026-10-28): Docker keeper sits on zoo's own `zoo-egress` bridge**, not the default `bridge`, so unrelated containers can't use it as a proxy. Keeper keeps CHOWN/SETUID/SETGID/DAC_OVERRIDE/FOWNER (squid drops to `proxy`), everything else dropped.
+- **D16 (2026-10-28): `zoo up --backend X --isolation-floor Y` is remembered in `~/.zoo/state.json`** so later commands and the daemon agree; a plain `zoo up` clears the remembered floor. Precedence: flag > env (`ZOO_BACKEND`, `ZOO_ISOLATION_FLOOR`) > config `backend` (non-auto) > remembered > auto; floor: flag > env > remembered > config.
 
 ---
 
@@ -866,8 +875,8 @@ Output format stays `PASS|FAIL|WARN <check>: <detail>`; `zoo doctor --json` for 
 Answer from evidence when you can; otherwise ask the human (see section 1).
 
 1. **Push default:** keep "agents commit, you push", or allow a single-repo push token so Orca/Conductor flows stay hands-off? (Asked in the spec doc; unanswered.)
-2. **Apple `container` details:** exact JSON fields for `list`/`stats`/`inspect`; whether `--mount …,readonly` works for single files; guest CAP_SYS_ADMIN; vsock availability; stable keeper IP.
-3. **Docker internal networks:** does the embedded DNS resolve external names on `--internal` networks across Docker Engine/Desktop/OrbStack/Podman versions? Is the host reachable from an internal bridge on Linux?
+2. **Apple `container` details:** answered for 1.6.1 in 6.4 and D11/D12 (list and inspect share one shape: `.id`, `.status.state`, `.configuration.labels`, `.status.networks[].{network,ipv4Address "x/24"}`; `--mount` rejects files, `-v` takes them; no CAP_SYS_ADMIN by default; keeper IP not stable). Open: vsock.
+3. **Docker internal networks:** OrbStack 29.8.2: embedded DNS answers container names but not external ones (SERVFAIL), with or without `--dns`; zoo still sets `--dns 127.0.0.1`. No default route. The internal network's gateway IP answers (RST) but leads only into the runtime's VM, not the Mac. `--ip` works on internal networks without `--subnet` (keeper pinning possible later). Open: Docker Desktop, Linux Engine, Podman/netavark.
 4. **Conductor PATH:** does it inherit the login shell PATH so shims catch it, or need an explicit agent path?
 5. **Orca:** can `orca.yaml` launch agents through `zoo`? How is remote SSH configured?
 6. **Store:** DuckDB (cgo) vs SQLite pure-Go for cross-compilation simplicity.
@@ -894,19 +903,19 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 - [x] README, Makefile, unit tests, fake-CLI e2e
 
 **M0: Harden v0 on Apple**
-- [ ] Verify 6.4 items on macOS 26 (`needs-hw`)
-- [ ] Exact stats/list field names; keep heuristics as fallback
-- [ ] `zoo status`
-- [ ] `zoo-init` capability detection and clear failure
-- [ ] Gate passes on real hardware
+- [x] Verify 6.4 items on real hardware (container 1.6.1, macOS 27.0.1); all but harness proxy behavior (needs tokens). See 6.4.
+- [x] Exact stats field names; heuristics kept as fallback (list/inspect still via jsonx, works on 1.6.1)
+- [x] `zoo status`
+- [x] `zoo-init` capability detection and clear failure
+- [ ] Gate passes on real hardware: `zoo doctor` all PASS (host-exposure WARN) in a main checkout and a linked worktree ✓; the `zoo run claude -- -p …` part needs a Claude token (`needs-human`)
 
 **M1: Backend interface + docker**
-- [ ] `internal/backend` interface; Apple moved behind it
-- [ ] Docker/Podman driver with host-side masks and hardening flags
-- [ ] Isolation levels, `isolation_floor`, badges (I12)
-- [ ] `zoo backend`
+- [x] `internal/backend` interface; Apple moved behind it
+- [x] Docker/Podman driver with host-side masks and hardening flags (escape suite PASS on OrbStack 29.8.2; podman untested: no machine)
+- [x] Isolation levels, `isolation_floor`, badges (I12)
+- [x] `zoo backend`
 - [ ] Contract suite + docker fake
-- [ ] Linux CI gate
+- [ ] Linux CI gate (`.github/workflows/ci.yml` written; not run until pushed: `needs-human`)
 
 **M2: Allowlist layers, gc, first-seen**
 - [ ] Per-cage squid ACLs from global ∪ harness ∪ project
@@ -968,6 +977,8 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 ### 19.2 Changelog
 
 - 2026-10-28: v0 built (Apple backend, squid keeper, daemon, static dashboard, doctor, shims). Tested against a fake `container` CLI.
+- 2026-10-28: M0 verified on container 1.6.1. Fixed: in-guest masks/git guard silently failed (no CAP_SYS_ADMIN); squid -k reconfigure failed (squid was PID 1); `.git` rename bypassed the git guard; linked-worktree `.git` file and `commondir` were writable; IP-keyed learn mode leaked across cages on IP reuse; squid matched IP-literal CONNECTs by PTR name (now `dstdomain -n`).
+- 2026-10-28: M1: `internal/backend` with `apple`, `docker`, `podman`; host-side guard on all backends; isolation floor; `zoo backend`, `zoo status`; escape suite PASS on OrbStack and Apple.
 
 ---
 

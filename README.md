@@ -2,17 +2,39 @@
 
 Run AI coding agents in small VMs ("cages") whose only way out is a logging, allowlisting proxy ("the keeper"), and watch everything on a live dashboard.
 
-- **Cage:** one Apple `container` VM per worktree. Your worktree is shared in; nothing else from your Mac is.
-- **Keeper:** squid in its own small VM. Cages sit on an internal network with no internet, so the keeper is the only route out. Default-deny allowlist, every request logged.
+- **Cage:** one sandbox per worktree: an Apple `container` VM, or a Docker/Podman container. Your worktree is shared in; nothing else from your machine is.
+- **Keeper:** squid in its own small VM or container. Cages sit on an internal network with no internet, so the keeper is the only route out. Default-deny allowlist, every request logged.
 - **Dashboard:** what's running, CPU and memory per cage, and a live network feed with search and filters, on `http://127.0.0.1:7777`.
 
 Works with any CLI agent (Claude Code, Codex, pi, opencode, …) and any tool that launches them (Conductor, Orca, herdr, your terminal).
 
 ## Requirements
 
-- macOS 26+ on Apple silicon (internal networks need 26)
-- Apple's `container` CLI: <https://github.com/apple/container/releases>
-- Go 1.24+ to build from source
+One of these backends:
+
+| Backend | Runs on | Isolation | Notes |
+|---|---|---|---|
+| `apple` | macOS 26+, Apple silicon, [`container`](https://github.com/apple/container/releases) | `vm`: a VM per cage | Default when installed. |
+| `docker` | OrbStack, Docker Desktop, colima, Docker Engine (macOS or Linux) | `container`: cages share one kernel | Set `docker.runtime: kata` (`microvm`) or `runsc` (`sandboxed-container`) on Linux for more. |
+| `podman` | Podman (machine on macOS, native on Linux) | `container` | Same driver as docker. |
+
+Go 1.24+ to build from source.
+
+### Picking a backend and the isolation floor
+
+`zoo backend` lists what's installed, running, and how strong each is. `auto` (the default) picks the strongest ready backend that meets your **isolation floor**.
+
+The floor defaults to `microvm`: zoo refuses to start cages that share a kernel with each other unless you say so. Plain Docker/OrbStack/Podman cages are `container` isolation, so to use them:
+
+```sh
+zoo up --backend docker --isolation-floor container   # remembered for later commands
+# or in ~/.zoo/config.yaml:
+#   backend: docker
+#   isolation_floor: container
+# or once: zoo run --allow-weaker-isolation claude   (the cage is marked "below floor")
+```
+
+The isolation level is shown in `zoo ls`, `zoo status`, `zoo doctor` and on every dashboard card. `zoo backend use <name>` switches the default; cages on the old backend stay where they are.
 
 ## Install
 
@@ -56,15 +78,18 @@ zoo dash                    # open the dashboard
 | `zoo shims install` | PATH shims so other tools land in cages |
 | `zoo doctor [cage]` | Check every wall from inside a cage |
 | `zoo build [cage\|keeper]` | Rebuild images (then `zoo reset` cages to pick it up) |
+| `zoo backend [list\|use <name>]` | Show backends, their isolation and readiness; pick one |
+| `zoo status` | Backend, isolation, keeper, dashboard, shims at a glance |
+| `--backend B`, `--isolation-floor L`, `--allow-weaker-isolation` | Global flags for any command |
 
 ### Sizes
 
-| Size | CPUs | Memory |
-|---|---|---|
-| `tiny` | 1 | 1 GiB |
-| `small` (default) | 2 | 2 GiB |
-| `medium` | 4 | 4 GiB |
-| `large` | 6 | 8 GiB |
+| Size | CPUs | Memory | Processes |
+|---|---|---|---|
+| `tiny` | 1 | 1 GiB | 512 |
+| `small` (default) | 2 | 2 GiB | 1024 |
+| `medium` | 4 | 4 GiB | 2048 |
+| `large` | 6 | 8 GiB | 4096 |
 
 `--size 3:6G` for a one-off. Per repo: `size: medium` in `zoo.yaml`. Changing size restarts the cage; the worktree is untouched. Define your own under `sizes:` in `~/.zoo/config.yaml`.
 
@@ -82,7 +107,8 @@ unmask: [".env.test"]            # files the defaults would hide but this repo n
 |---|---|
 | Read/write your worktree | Yes |
 | See `.env*`, `*.pem`, `*.key`, `id_*`, `.npmrc`, `.netrc` in the worktree | No: replaced by empty read-only files |
-| Write `.git/hooks` or `.git/config` (things that run on your Mac later) | No: read-only |
+| Write `.git/hooks` or `.git/config` (things that run on your Mac later) | No: read-only, and `.git` can't be renamed to get around that |
+| Gain capabilities, run setuid binaries | No: every capability dropped; agents run as an unprivileged user |
 | Reach the internet directly | No: internal network, no DNS |
 | Reach allowlisted hosts | Yes, through the keeper, logged |
 | Reach other hosts | No: denied and logged, alert on the dashboard |
@@ -172,20 +198,23 @@ zoo learn off
 - **Your Mac's open ports are visible to cages.** On an internal network the host gateway is still reachable ([apple/container#1320](https://github.com/apple/container/issues/1320)), so anything on your Mac bound to `0.0.0.0` is reachable from a cage. `zoo doctor` lists them. Common culprit: AirPlay Receiver (ports 5000/7000): turn it off in System Settings → General → AirDrop & Handoff. Bind dev servers to `127.0.0.1`.
 - **Allowed hosts can still carry data out** (e.g. a gist on github.com). The bytes-out alert is the tripwire.
 - **Attribution is per cage**, not per agent, when several agents share a cage.
-- **Masks and the git guard are applied inside the guest by `zoo-init`.** `zoo doctor` verifies they held.
+- **Masks are fixed when a cage is created.** A secret file added on the host later is hidden after `zoo reset`. On Apple, edits you make to `.git/config` on the host also show up in the cage only after `zoo reset` (the cage sees a read-only copy).
+- **Docker/Podman cages share a kernel** (isolation `container`), which is why the floor refuses them by default. On macOS that kernel is OrbStack's or Docker Desktop's VM, not your Mac's.
+- **`nproc` inside a Docker cage shows all host CPUs**; the CPU limit is a quota, not a CPU set.
 - **No disk limit per cage yet**, and no Docker-inside-the-cage yet.
-- **Built against Apple `container`'s documented CLI but not yet run on real hardware.** If `zoo up` fails on the keeper's two `--network` flags, that's the first thing to report.
 
 ## Troubleshooting
 
 - `zoo up` fails on `network create --internal`: needs macOS 26 and a recent `container` release.
+- `zoo run` says the backend is below your isolation floor: see "Picking a backend" above.
+- After upgrading zoo: `zoo build && zoo down && zoo up`, then `zoo reset` each cage so it picks up the new image and mounts.
 - Agent can't reach something it needs: look for the red row in the dashboard and click **Allow**, or `zoo allow host`.
 - Cage files owned by the wrong user: the cage image uses your Mac uid/gid at build time; rebuild with `zoo build cage` and `zoo reset <cage>`.
 - Dashboard empty: `cat ~/.zoo/daemon.log`, then `zoo down && zoo up`.
 
 ## Roadmap
 
-1. Cage + keeper + basic dashboard ← you are here
+1. Cage + keeper + basic dashboard; Apple and Docker/Podman backends ← you are here
 2. Visibility: OTel collector + store, file watcher, resource history, phone alerts
 3. Agent sessions: Claude Code / Codex OTel → AG-UI timelines, Tetragon in the guest, per-agent attribution, SSH into cages
 4. Homelab + k8s: k3s + Kata on Proxmox, keeper as egress gateway, Helm chart
