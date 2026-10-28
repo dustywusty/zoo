@@ -957,7 +957,7 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 - [x] Secret sources: Bitwarden CLI, 1Password CLI (tested against fake CLIs; owner has neither CLI installed)
 - [x] Per-cage networks on docker (lateral traffic: "Network is unreachable")
 - [x] Dashboard: services, grants, connections, signs, approvals; minimal visual refresh
-- [ ] Gate: passes on OrbStack (host service, sidecar, github.com:22, agent filtering, approvals, ungranted cage refused); Apple run pending
+- [x] Gate: passes on OrbStack and Apple 1.6.1 (host service on 127.0.0.1, sidecar, github.com:22, agent filtering, approvals on OrbStack, ungranted cage refused, escape suite PASS)
 
 **M3: Store, service, API v1**
 - [ ] Store + retention + backfill
