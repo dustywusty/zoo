@@ -207,7 +207,7 @@ zoo learn off
 
 - `zoo up` fails on `network create --internal`: needs macOS 26 and a recent `container` release.
 - `zoo run` says the backend is below your isolation floor: see "Picking a backend" above.
-- After upgrading zoo: `zoo build && zoo down && zoo up`, then `zoo reset` each cage so it picks up the new image and mounts.
+- After upgrading zoo: `zoo up` builds the new images and replaces the keeper. Stopped cages are rebuilt on their next run; a running cage from an older zoo prints a warning: stop its agents and `zoo reset` it.
 - Agent can't reach something it needs: look for the red row in the dashboard and click **Allow**, or `zoo allow host`.
 - Cage files owned by the wrong user: the cage image uses your Mac uid/gid at build time; rebuild with `zoo build cage` and `zoo reset <cage>`.
 - Dashboard empty: `cat ~/.zoo/daemon.log`, then `zoo down && zoo up`.

@@ -82,9 +82,11 @@ func Defaults() Global {
 			"codex":  {Command: "codex", Env: map[string]string{"OPENAI_API_KEY": "codex"}, Files: map[string]string{".codex/auth.json": "codex-auth"}},
 			"shell":  {Command: "bash"},
 		},
-		BytesOutAlert:  5 << 20,
-		CageImage:      "zoo-cage:latest",
-		KeeperImage:    "zoo-keeper:latest",
+		BytesOutAlert: 5 << 20,
+		// Bump the tag when the images or the mounts they expect change:
+		// zoo rebuilds missing images and replaces instances on an old tag.
+		CageImage:      "zoo-cage:m1",
+		KeeperImage:    "zoo-keeper:m1",
 		Network:        "zoo-cages",
 		Backend:        "auto",
 		IsolationFloor: "microvm",

@@ -32,6 +32,7 @@ const (
 	LabelBackend  = "zoo.backend"
 	LabelIso      = "zoo.isolation"
 	LabelWeaker   = "zoo.weaker-isolation" // set when started below the isolation floor
+	LabelImage    = "zoo.image"            // image the cage was created from
 )
 
 // Plan is everything needed to create a cage for one worktree.
@@ -236,6 +237,7 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 		LabelSize:     pl.SizeName,
 		LabelCPUs:     fmt.Sprint(pl.Size.CPUs),
 		LabelMemory:   pl.Size.Memory,
+		LabelImage:    g.CageImage,
 	}
 	for k, v := range labels {
 		l[k] = v
@@ -259,7 +261,15 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 	}
 }
 
+// Stale reports whether an existing cage predates the current image (and so
+// may lack the mounts this zoo relies on, e.g. v0 cages' guard).
+func Stale(st backend.Status, spec backend.CageSpec) bool {
+	return st.Labels[LabelImage] != spec.Image
+}
+
 // Ensure creates or starts the cage. Returns true if it was (re)created.
+// A stopped cage from an older image is recreated; a running one is left
+// alone (agents may be inside) and reported by Stale.
 func Ensure(ctx context.Context, b backend.Backend, spec backend.CageSpec) (bool, error) {
 	st, exists, err := b.Get(ctx, spec.ID)
 	if err != nil {
@@ -267,6 +277,12 @@ func Ensure(ctx context.Context, b backend.Backend, spec backend.CageSpec) (bool
 	}
 	if exists && st.Running {
 		return false, nil
+	}
+	if exists && Stale(st, spec) {
+		if err := b.Delete(ctx, spec.ID); err != nil {
+			return false, err
+		}
+		exists = false
 	}
 	if exists {
 		if err := b.Start(ctx, spec.ID); err == nil {

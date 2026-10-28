@@ -358,11 +358,18 @@ func Up(ctx context.Context, b backend.Backend, g config.Global) (string, error)
 	if err := b.EnsureNetwork(ctx); err != nil {
 		return "", err
 	}
+	// The keeper holds no state of its own: replace one built from another image.
+	if st, ok, _ := b.Get(ctx, Name); ok && st.Labels["zoo.image"] != g.KeeperImage {
+		fmt.Fprintf(os.Stderr, "zoo: replacing the keeper (image %q -> %q)\n", st.Labels["zoo.image"], g.KeeperImage)
+		if err := b.Delete(ctx, Name); err != nil {
+			return "", fmt.Errorf("replace keeper: %w", err)
+		}
+	}
 	ip, err := b.EnsureKeeper(ctx, backend.KeeperSpec{
 		ID: Name, Image: g.KeeperImage,
 		EtcDir: paths.KeeperEtc(), LogDir: paths.KeeperLog(),
 		CPUs: 1, Memory: "512M",
-		Labels: map[string]string{"zoo.role": "keeper"},
+		Labels: map[string]string{"zoo.role": "keeper", "zoo.image": g.KeeperImage},
 	})
 	if err != nil {
 		return "", err

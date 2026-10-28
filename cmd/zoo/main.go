@@ -497,7 +497,11 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 		labels[cage.LabelWeaker] = "1"
 		say("WARNING: %s runs with %s isolation, below your floor (%s), because of --allow-weaker-isolation", pl.Name, e.info.Caps.Isolation, e.floor)
 	}
-	created, err := cage.Ensure(ctx, e.b, pl.Spec(e.g, ip, labels))
+	spec := pl.Spec(e.g, ip, labels)
+	if st, ok, _ := e.b.Get(ctx, pl.ID); ok && st.Running && cage.Stale(st, spec) {
+		say("WARNING: %s was created by an older zoo; its secret masks and git guard may not hold. Stop the agents in it, then `zoo reset %s`", pl.Name, pl.Name)
+	}
+	created, err := cage.Ensure(ctx, e.b, spec)
 	if err != nil {
 		return pl, ip, err
 	}
