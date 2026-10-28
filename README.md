@@ -8,6 +8,10 @@ Run AI coding agents in small VMs ("cages") whose only way out is a logging, all
 
 Works with any CLI agent (Claude Code, Codex, pi, opencode, …) and any tool that launches them (Conductor, Orca, herdr, your terminal).
 
+![zoo dashboard](docs/images/dashboard-dark.png)
+
+How it fits together, with the trust boundaries and sequence diagrams: [docs/overview.html](docs/overview.html) (open it locally) or the [architecture diagram](docs/images/architecture.png).
+
 ## Requirements
 
 One of these backends:
