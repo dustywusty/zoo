@@ -239,6 +239,11 @@ var behaviors = []behavior{
 			if !n.Internal {
 				t.Errorf("%s is not internal", name)
 			}
+			// On a Linux host the bridge's host address is the host itself:
+			// docker networks must not have one (CI found sshd reachable).
+			if h.tg.backend == "docker" && n.Options["com.docker.network.bridge.inhibit_ipv4"] != "true" {
+				t.Errorf("%s gives the host an address: options %v", name, n.Options)
+			}
 			creates := 0
 			for _, c := range st.Calls {
 				if len(c) > 2 && c[1] == "network" && c[2] == "create" && c[len(c)-1] == name {
@@ -322,6 +327,9 @@ var behaviors = []behavior{
 		n := st.Net(net)
 		if n == nil || !n.Internal {
 			t.Fatalf("CageNetwork = %q; want an existing internal network (got %+v)", net, n)
+		}
+		if h.tg.backend == "docker" && n.Options["com.docker.network.bridge.inhibit_ipv4"] != "true" {
+			t.Errorf("cage network %s gives the host an address: options %v", net, n.Options)
 		}
 		if h.tg.perCage {
 			if net == cageNet || net == svcNet {

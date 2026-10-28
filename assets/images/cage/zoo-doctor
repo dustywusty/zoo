@@ -133,6 +133,13 @@ if [ -z "$gw" ]; then
   ip=$(hostname -I 2>/dev/null | awk '{print $1}')
   [ -n "$ip" ] && gw="${ip%.*}.1"
 fi
+# With no host address on the network (docker), .1 may be the keeper or this
+# cage: those aren't the host.
+self_ips=" $(hostname -I 2>/dev/null) "
+if [ -n "$gw" ] && { [ "$gw" = "${ZOO_KEEPER:-}" ] || [ "${self_ips#* "$gw" }" != "$self_ips" ]; }; then
+  pass "host-exposure" "no host address on this network"
+  gw=""
+fi
 if [ -n "$gw" ]; then
   open=""
   for port in 22 80 443 3000 5000 5173 5432 6379 7000 7777 8000 8080 8443 9000; do

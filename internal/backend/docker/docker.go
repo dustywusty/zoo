@@ -147,13 +147,36 @@ func (d *Docker) BuildImage(ctx context.Context, s backend.ImageSpec) error {
 	return d.cli.Attach(ctx, append(args, s.Context)...)
 }
 
+// noHostAddr keeps Docker from giving the host an address on a bridge. On
+// a Linux host that address is the host itself, so without this anything
+// listening on all interfaces (sshd, databases) is reachable from every cage,
+// internal network or not (found by the escape suite in CI). Cages and the
+// keeper need no gateway on internal networks. Podman's netavark has no such
+// option.
+const noHostAddr = "com.docker.network.bridge.inhibit_ipv4=true"
+
+func (d *Docker) internalNetArgs() []string {
+	args := []string{"--internal"}
+	if d.name == "docker" {
+		args = append(args, "-o", noHostAddr)
+	}
+	return args
+}
+
 func (d *Docker) ensureNet(ctx context.Context, name string, internal bool) error {
-	if d.cli.OK(ctx, "network", "inspect", name) {
-		return nil
+	if out, err := d.cli.Run(ctx, "network", "inspect", name, "--format", "{{json .Options}}"); err == nil {
+		if !internal || d.name != "docker" || strings.Contains(out, "inhibit_ipv4") {
+			return nil
+		}
+		// Made by an older zoo with a host address: replace it if nothing uses it.
+		if _, err := d.cli.Run(ctx, "network", "rm", name); err != nil {
+			fmt.Fprintf(os.Stderr, "zoo: network %s gives the host an address cages can reach; stop its cages and run zoo up again to replace it\n", name)
+			return nil
+		}
 	}
 	args := []string{"network", "create", "--label", "zoo=1"}
 	if internal {
-		args = append(args, "--internal")
+		args = append(args, d.internalNetArgs()...)
 	}
 	_, err := d.cli.Run(ctx, append(args, name)...)
 	return err
@@ -196,7 +219,8 @@ func (d *Docker) connectKeeper(ctx context.Context, keeperID, network string) (s
 func (d *Docker) CageNetwork(ctx context.Context, cageID string) (string, string, error) {
 	n := d.cageNet(cageID)
 	if !d.cli.OK(ctx, "network", "inspect", n) {
-		if _, err := d.cli.Run(ctx, "network", "create", "--internal", "--label", "zoo=1", "--label", "zoo.cage-net="+cageID, n); err != nil {
+		args := append([]string{"network", "create", "--label", "zoo=1", "--label", "zoo.cage-net=" + cageID}, d.internalNetArgs()...)
+		if _, err := d.cli.Run(ctx, append(args, n)...); err != nil {
 			fmt.Fprintf(os.Stderr, "zoo: couldn't create a network for %s (%v); it shares %s with other cages\n", cageID, err, d.network)
 			n = d.network
 		}

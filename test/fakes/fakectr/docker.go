@@ -220,7 +220,7 @@ func (f *fake) dockerNetwork(args []string) error {
 		}
 		format := p.last("format")
 		switch format {
-		case "", jsonFormat, gatewayFormat, "{{.Name}}", "{{.Internal}}":
+		case "", jsonFormat, gatewayFormat, "{{.Name}}", "{{.Internal}}", "{{json .Options}}":
 		default:
 			return usagef("unsupported network inspect --format %q", format)
 		}
@@ -249,6 +249,14 @@ func (f *fake) dockerNetwork(args []string) error {
 				fmt.Fprintln(f.out, n.Name)
 			case "{{.Internal}}":
 				fmt.Fprintln(f.out, n.Internal)
+			case "{{json .Options}}":
+				opts := n.Options
+				if opts == nil {
+					opts = map[string]string{}
+				}
+				if err := writeJSON(f.out, opts); err != nil {
+					return err
+				}
 			}
 		}
 		if format == "" {
@@ -261,7 +269,7 @@ func (f *fake) dockerNetwork(args []string) error {
 		}
 		return nil
 	case "create":
-		p, pos, err := parse("network create", defs("--internal", "--label=", "-d,--driver=", "--subnet="), args[1:], false)
+		p, pos, err := parse("network create", defs("--internal", "--label=", "-d,--driver=", "--subnet=", "-o,--opt="), args[1:], false)
 		if err != nil {
 			return err
 		}
@@ -278,7 +286,17 @@ func (f *fake) dockerNetwork(args []string) error {
 		if err != nil {
 			return err
 		}
+		opts, err := parseLabels(p["opt"])
+		if err != nil {
+			return err
+		}
+		if f.dialect == "podman" && len(opts) > 0 {
+			return fmt.Errorf("Error: unsupported bridge network option") // netavark
+		}
 		n := f.newNetwork(pos[0], p.has("internal"), labels)
+		if len(opts) > 0 {
+			n.Options = opts
+		}
 		fmt.Fprintln(f.out, hashID("net/"+n.Name))
 		return nil
 	case "connect":

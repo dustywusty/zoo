@@ -54,6 +54,7 @@ type Network struct {
 	Name     string            `json:"name"`
 	Internal bool              `json:"internal"`
 	Labels   map[string]string `json:"labels"`
+	Options  map[string]string `json:"options,omitempty"` // driver options (-o k=v)
 	Subnet   int               `json:"subnet"` // third octet of 192.168.X.0/24
 	Next     int               `json:"next"`   // next host octet to hand out
 }
