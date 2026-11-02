@@ -20,7 +20,7 @@ One of these backends:
 |---|---|---|---|
 | `apple` | macOS 26+, Apple silicon, [`container`](https://github.com/apple/container/releases) | `vm`: a VM per cage | Default when installed. |
 | `docker` | OrbStack, Docker Desktop, colima, Docker Engine (macOS or Linux); Docker Desktop on Windows | `container`: cages share one kernel | Set `docker.runtime: kata` (`microvm`) or `runsc` (`sandboxed-container`) on Linux for more. |
-| `podman` | Podman (machine on macOS, native on Linux) | `container` | Same driver as docker. |
+| `podman` | Podman (machine on macOS, native on Linux) | `container` | Same driver as docker. The dashboard watches it through its API service when one is running (Linux: `systemctl --user enable --now podman.socket`), else polls the CLI. |
 
 Go 1.24+ to build from source.
 
