@@ -72,12 +72,12 @@ zoo dash                    # open the dashboard
 | Command | Does |
 |---|---|
 | `zoo up` / `zoo down [--all]` | Start / stop the keeper and dashboard (`--all` also stops cages) |
-| `zoo run [harness] [--size S] [--learn] [-- args]` | Run an agent in this worktree's cage. Default harness: `claude` |
+| `zoo run [harness] [--size S] [-- args]` | Run an agent in this worktree's cage. Default harness: `claude` |
 | `zoo shell [cage]` | Bash in a cage |
 | `zoo ls` | List cages |
 | `zoo stop <cage\|all>` / `zoo reset <cage>` | Stop a cage / delete it so the next run starts clean |
 | `zoo allow <host…>` / `zoo deny <host…>` / `zoo allowlist` | Edit the allowlist (`.example.com` = domain + subdomains) |
-| `zoo learn on\|off [cage]` / `zoo learned [cage]` | Allow-and-log everything for a cage, then review what it reached |
+| `zoo blocked [cage]` | Hosts the keeper refused that aren't allowlisted: your approval queue |
 | `zoo keys set\|rm <name>` / `zoo keys ls` | Harness credentials in the Keychain |
 | `zoo shims install` | PATH shims so other tools land in cages |
 | `zoo doctor [cage]` | Check every wall from inside a cage |
@@ -112,6 +112,9 @@ unmask: [".env.test"]            # files the defaults would hide but this repo n
 | Read/write your worktree | Yes |
 | See `.env*`, `*.pem`, `*.key`, `id_*`, `.npmrc`, `.netrc` in the worktree | No: replaced by empty read-only files |
 | Write `.git/hooks` or `.git/config` (things that run on your Mac later) | No: read-only, and `.git` can't be renamed to get around that |
+| Redirect another worktree's git, or a submodule's (`.git/worktrees/*`, `.git/modules`) | No: read-only; only this worktree's own gitdir is writable |
+| Plant a repository in the worktree (`sub/.git`, a bare repo, a `.git` file pointing elsewhere) | Can't be blocked, so it's caught: `zoo run` warns when the session ends, the dashboard alerts within 30 s, `zoo doctor` fails. Don't run git in a flagged dir; delete it |
+| Reach your Mac, LAN, tailnet or cloud metadata through the keeper | No: private, loopback, link-local and CGNAT addresses are refused even for allowlisted names |
 | Gain capabilities, run setuid binaries | No: every capability dropped; agents run as an unprivileged user |
 | Reach the internet directly | No: internal network, no DNS |
 | Reach allowlisted hosts | Yes, through the keeper, logged |
@@ -174,19 +177,20 @@ The CLI must be installed in the cage image: add it to `assets/images/cage/Docke
 
 - **Cages:** status, size, live CPU / memory / network against limits, attached agents, request and deny counts. Stop button.
 - **Network:** every request from every cage, live. Search box (`/` to focus) matches host, URL, cage, method and status; `-term` excludes. Filter by cage and by All / Allowed / Denied / New hosts. Pause freezes the feed while you read. **Allow** on a blocked row adds that host for every cage.
-- **Alerts:** blocked requests, and any cage that uploads more than 5 MB to one host (`bytes_out_alert` in config). Set `ntfy_url` to get them on your phone.
+- **Alerts:** blocked requests, a repository planted in a worktree, and any cage that uploads more than 5 MB to one host (`bytes_out_alert` in config). Set `ntfy_url` to get them on your phone.
 
 It listens on 127.0.0.1 only; changes need a per-install token, so other web pages can't drive it.
 
-## Learn mode
+## First run in a new repo
 
-New repo, don't know what it needs? `zoo run claude --learn` allows everything for that cage and logs it. Afterwards:
+There's no allow-everything mode: every host is approved by hand. Run the agent, let it hit walls, and approve what you trust, either with **Allow** on a red row in the dashboard or from the terminal:
 
 ```sh
-zoo learned            # hosts reached that aren't on the allowlist
+zoo blocked            # hosts refused that aren't on the allowlist, most-requested first
 zoo allow <the ones you trust>
-zoo learn off
 ```
+
+Approvals apply to running cages immediately; the agent just retries.
 
 ## Files
 
@@ -200,7 +204,10 @@ zoo learn off
 ## Known gaps in v0
 
 - **Your Mac's open ports are visible to cages.** On an internal network the host gateway is still reachable ([apple/container#1320](https://github.com/apple/container/issues/1320)), so anything on your Mac bound to `0.0.0.0` is reachable from a cage. `zoo doctor` lists them. Common culprit: AirPlay Receiver (ports 5000/7000): turn it off in System Settings → General → AirDrop & Handoff. Bind dev servers to `127.0.0.1`.
-- **Allowed hosts can still carry data out** (e.g. a gist on github.com). The bytes-out alert is the tripwire.
+- **Allowed hosts can still carry data out** (e.g. a gist on github.com, using a token the attacker supplies). The bytes-out alert is the tripwire, and it won't notice a few KB.
+- **Branches are shared.** The cage writes the repo's refs, so an agent can move any branch (`main`, or `origin/*` so it looks pushed). Check `git log` before you push something you didn't watch it make.
+- **Planted repositories are detected, not prevented.** The dashboard scans every 30 s, so a shell prompt or editor running git in the worktree *while* the agent works can beat it. Setting `safe.bareRepository=explicit` in your global git config closes the bare-repo variant for good.
+- **Submodules are read-only in cages** (`.git/modules`): update them on the host.
 - **Attribution is per cage**, not per agent, when several agents share a cage.
 - **Masks are fixed when a cage is created.** A secret file added on the host later is hidden after `zoo reset`. On Apple, edits you make to `.git/config` on the host also show up in the cage only after `zoo reset` (the cage sees a read-only copy).
 - **Docker/Podman cages share a kernel** (isolation `container`), which is why the floor refuses them by default. On macOS that kernel is OrbStack's or Docker Desktop's VM, not your Mac's.

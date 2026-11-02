@@ -33,7 +33,7 @@ else
   out=$(curl -sS -m 15 -o /dev/null https://example.com 2>&1)
   rc=$?
   if [ $rc -eq 0 ]; then
-    fail "not-allowlisted" "example.com was reachable (is learn mode on for this cage?)"
+    fail "not-allowlisted" "example.com was reachable through the keeper (is it on the allowlist?)"
   elif printf '%s' "$out" | grep -q '403'; then
     pass "not-allowlisted" "example.com denied by keeper"
   else
@@ -80,6 +80,32 @@ if [ -n "${ZOO_READONLY:-}" ]; then
       if ( : >> "$p" ) 2>/dev/null; then fail "git-guard" "$p is writable"; else pass "git-guard" "$p read-only"; fi
     fi
   done <<< "$ZOO_READONLY"
+fi
+
+# 6a. No other linked worktree can be redirected: rewriting its commondir
+# would point the host's git at a config the agent wrote. This cage's own
+# gitdir (if it is a linked worktree) must still be writable for git to work.
+common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+own=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null)
+if [ -n "$common" ] && [ -d "$common/worktrees" ]; then
+  for d in "$common"/worktrees/*/; do
+    d=${d%/}
+    [ -f "$d/commondir" ] || continue
+    [ "$d" = "$own" ] && continue
+    if ( : >> "$d/commondir" ) 2>/dev/null; then
+      fail "git-worktrees" "$d/commondir is writable (another worktree could be redirected)"
+    else
+      pass "git-worktrees" "$(basename "$d") can't be redirected"
+    fi
+  done
+  if [ -n "$own" ] && [ "$own" != "$common" ]; then
+    if touch "$own/.zoo-doctor" 2>/dev/null; then
+      rm -f "$own/.zoo-doctor"
+      pass "git-own" "this worktree's gitdir is writable"
+    else
+      fail "git-own" "$own is read-only: git commits in this cage will fail"
+    fi
+  fi
 fi
 
 # 6b. Directories holding read-only paths can't be renamed (a rename would

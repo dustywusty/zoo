@@ -87,8 +87,13 @@ type CageSpec struct {
 	Env      []string // non-secret only (K=V)
 	Mounts   []Mount  // rw mounts of the worktree and git dir, same path inside
 	Masks    []string // files to show as empty and read-only
-	ReadOnly []string // paths to make read-only (.git/hooks, .git/config)
+	ReadOnly []string // paths to make read-only (.git/hooks, .git/config, .git/worktrees)
 	Pin      []string // directories that must not be renamed from inside (.git)
+	// ReopenRW are directories inside a ReadOnly directory made writable
+	// again (this cage's own entry under .git/worktrees). Mounted after the
+	// read-only directories and before the read-only files, which may sit
+	// inside them.
+	ReopenRW []string
 }
 
 // KeeperSpec describes the keeper instance.

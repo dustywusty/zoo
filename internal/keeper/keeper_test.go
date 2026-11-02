@@ -2,6 +2,7 @@ package keeper
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -69,36 +70,6 @@ func TestAllowDenyPrune(t *testing.T) {
 	}
 }
 
-func TestLearn(t *testing.T) {
-	t.Setenv("ZOO_HOME", t.TempDir())
-	_ = EnsureFiles()
-	_ = SetLearn("api-1a2b3c", true)
-	if changed, _ := SyncLearn(map[string]string{"api-1a2b3c": "192.168.64.9", "web-4d5e6f": "192.168.64.10"}); !changed {
-		t.Fatal("sync should report a change")
-	}
-	if ips := LearnIPs(); !ips["192.168.64.9"] || ips["192.168.64.10"] {
-		t.Fatalf("learn on: %v", ips)
-	}
-	if changed, _ := SyncLearn(map[string]string{"api-1a2b3c": "192.168.64.9"}); changed {
-		t.Fatal("no-op sync reported a change")
-	}
-	// The cage restarted with a new IP and another cage got the old one:
-	// learn mode must follow the cage, not the address.
-	_, _ = SyncLearn(map[string]string{"api-1a2b3c": "192.168.64.20", "web-4d5e6f": "192.168.64.9"})
-	if ips := LearnIPs(); ips["192.168.64.9"] || !ips["192.168.64.20"] {
-		t.Fatalf("learn followed the IP, not the cage: %v", ips)
-	}
-	_ = SetLearn("api-1a2b3c", false)
-	_, _ = SyncLearn(map[string]string{"api-1a2b3c": "192.168.64.20"})
-	if len(LearnIPs()) != 0 {
-		t.Fatal("learn off failed")
-	}
-	b, _ := os.ReadFile(paths.LearnList())
-	if !strings.Contains(string(b), learnPlaceholder) {
-		t.Fatal("placeholder missing; squid needs a non-empty src acl")
-	}
-}
-
 func TestSquidConfNoReverseLookup(t *testing.T) {
 	t.Setenv("ZOO_HOME", t.TempDir())
 	if err := EnsureFiles(); err != nil {
@@ -108,4 +79,75 @@ func TestSquidConfNoReverseLookup(t *testing.T) {
 	if !strings.Contains(string(b), `dstdomain -n "/etc/zoo/allowlist.txt"`) {
 		t.Fatal("allowlist acl must use -n so IP literals aren't matched by their PTR name")
 	}
+}
+
+// Private destinations are refused before anything is allowed, and nothing
+// allows by source (the old learn mode): every new host is approved by hand.
+func TestSquidConfDeniesPrivateFirst(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ZOO_HOME", home)
+	// Files from an install that had learn mode.
+	_ = os.MkdirAll(paths.KeeperEtc(), 0o755)
+	for _, f := range []string{"learn.txt", "learn-cages.txt"} {
+		_ = os.WriteFile(filepath.Join(paths.KeeperEtc(), f), []byte("10.0.0.5/32\n"), 0o644)
+	}
+	if err := EnsureFiles(); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"learn.txt", "learn-cages.txt"} {
+		if _, err := os.Stat(filepath.Join(paths.KeeperEtc(), f)); err == nil {
+			t.Errorf("%s from learn mode left behind", f)
+		}
+	}
+	b, _ := os.ReadFile(paths.SquidConf())
+	conf := string(b)
+	var access []string
+	for _, l := range strings.Split(conf, "\n") {
+		if strings.HasPrefix(l, "http_access ") {
+			access = append(access, strings.TrimPrefix(l, "http_access "))
+		}
+		if strings.HasPrefix(l, "acl ") && strings.Contains(l, " src ") {
+			t.Errorf("source-based acl (allow-all for a cage?): %s", l)
+		}
+	}
+	firstAllow := -1
+	for i, a := range access {
+		if strings.HasPrefix(a, "allow ") && firstAllow < 0 {
+			firstAllow = i
+		}
+	}
+	if firstAllow < 0 || access[firstAllow] != "allow zoo_allowed" || access[len(access)-1] != "deny all" {
+		t.Fatalf("want a single allow (zoo_allowed) and deny all last: %v", access)
+	}
+	for _, want := range []string{"deny zoo_private_name", "deny zoo_private"} {
+		i := indexOf(access, want)
+		if i < 0 || i > firstAllow {
+			t.Errorf("%q must come before the allow: %v", want, access)
+		}
+	}
+	for _, cidr := range []string{"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "::1/128", "fc00::/7", "fe80::/10"} {
+		if !strings.Contains(conf, " "+cidr) {
+			t.Errorf("private range %s not denied", cidr)
+		}
+	}
+	// Squid stores IPv4 as v4-mapped IPv6, so these read as 0.0.0.0/0: in a
+	// deny they'd refuse everything (squid currently drops them with a
+	// warning; don't rely on it).
+	for _, all := range []string{"::/128", "::/0", "::ffff:0:0/96", "0.0.0.0/0"} {
+		if strings.Contains(conf, " "+all) {
+			t.Errorf("%s in the config means every address to squid", all)
+		}
+	}
+	if !strings.Contains(conf, ".internal") {
+		t.Error("host.docker.internal & co. not denied by name")
+	}
+}
+
+func indexOf(xs []string, s string) int {
+	for i, x := range xs {
+		if x == s {
+			return i
+		}
+	}
+	return -1
 }

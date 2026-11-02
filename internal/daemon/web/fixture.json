@@ -49,7 +49,6 @@
       "host_pid": 4411
      }
     ],
-    "learn": false,
     "grants": [
      "pg",
      "github-ssh",
@@ -104,7 +103,6 @@
       "host_pid": 5302
      }
     ],
-    "learn": true,
     "grants": [
      "redis"
     ],
@@ -130,7 +128,6 @@
      "hosts": 6
     },
     "sessions": null,
-    "learn": false,
     "grants": [],
     "network": "zoo-docs-site"
    }
@@ -218,8 +215,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": true,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 2,
@@ -236,8 +232,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": true,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 3,
@@ -254,8 +249,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": true,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 4,
@@ -272,8 +266,7 @@
    "denied": false,
    "cage": "docs-site",
    "first_seen": true,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 5,
@@ -290,8 +283,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": true,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 6,
@@ -308,8 +300,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": true,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 7,
@@ -326,8 +317,7 @@
    "denied": true,
    "cage": "web-checkout",
    "first_seen": true,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 8,
@@ -344,8 +334,7 @@
    "denied": false,
    "cage": "docs-site",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 9,
@@ -362,8 +351,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 10,
@@ -380,8 +368,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": true,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 11,
@@ -398,8 +385,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": true,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 12,
@@ -416,8 +402,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": true,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 13,
@@ -434,8 +419,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 14,
@@ -452,8 +436,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 15,
@@ -470,8 +453,7 @@
    "denied": false,
    "cage": "docs-site",
    "first_seen": true,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 16,
@@ -488,8 +470,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 17,
@@ -506,8 +487,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": true,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 18,
@@ -524,8 +504,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 19,
@@ -542,8 +521,7 @@
    "denied": true,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 20,
@@ -560,8 +538,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 21,
@@ -578,8 +555,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 22,
@@ -596,8 +572,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": true,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 23,
@@ -614,8 +589,7 @@
    "denied": true,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 24,
@@ -632,8 +606,7 @@
    "denied": true,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 25,
@@ -650,8 +623,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 26,
@@ -668,8 +640,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 27,
@@ -686,8 +657,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": true,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 28,
@@ -704,8 +674,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 29,
@@ -722,8 +691,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 30,
@@ -740,8 +708,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 31,
@@ -758,8 +725,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 32,
@@ -776,8 +742,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 33,
@@ -794,8 +759,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": true,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 34,
@@ -812,8 +776,7 @@
    "denied": true,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 35,
@@ -830,8 +793,7 @@
    "denied": true,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 36,
@@ -848,8 +810,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 37,
@@ -866,8 +827,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 38,
@@ -884,8 +844,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 39,
@@ -902,8 +861,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 40,
@@ -920,8 +878,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 41,
@@ -938,8 +895,7 @@
    "denied": true,
    "cage": "web-checkout",
    "first_seen": true,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 42,
@@ -956,8 +912,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 43,
@@ -974,8 +929,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 44,
@@ -992,8 +946,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 45,
@@ -1010,8 +963,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 46,
@@ -1028,8 +980,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 47,
@@ -1046,8 +997,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 48,
@@ -1064,8 +1014,7 @@
    "denied": true,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 49,
@@ -1082,8 +1031,7 @@
    "denied": false,
    "cage": "discus",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": false
+   "allowlisted": true
   },
   {
    "id": 50,
@@ -1100,8 +1048,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   },
   {
    "id": 51,
@@ -1118,8 +1065,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": false,
-   "learn": true
+   "allowlisted": false
   },
   {
    "id": 52,
@@ -1136,8 +1082,7 @@
    "denied": false,
    "cage": "web-checkout",
    "first_seen": false,
-   "allowlisted": true,
-   "learn": true
+   "allowlisted": true
   }
  ],
  "alerts": [

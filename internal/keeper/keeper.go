@@ -15,7 +15,7 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"sort"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -73,11 +73,18 @@ acl SSL_ports port 443
 acl Safe_ports port 80 443
 acl CONNECT method CONNECT
 acl zoo_allowed dstdomain -n "/etc/zoo/allowlist.txt"
-acl zoo_learn src "/etc/zoo/learn.txt"
+# Never forward to the host, the LAN, a tailnet or cloud metadata, whatever
+# name was asked for: an allowlisted name that resolves to a private address
+# is still refused (.internal covers host.docker.internal and friends).
+# Host-side things go through zoo grant instead.
+acl zoo_private_name dstdomain -n .localhost .internal .local
+acl zoo_private dst 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3
+acl zoo_private dst ::1/128 64:ff9b::/96 fc00::/7 fe80::/10 ff00::/8
 
 http_access deny !Safe_ports
 http_access deny CONNECT !SSL_ports
-http_access allow zoo_learn
+http_access deny zoo_private_name
+http_access deny zoo_private
 http_access allow zoo_allowed
 http_access deny all
 
@@ -87,10 +94,7 @@ cache_log /var/log/zoo/cache.log
 logfile_rotate 0
 `
 
-// learnPlaceholder keeps the src ACL file non-empty (an unroutable address).
-const learnPlaceholder = "127.0.0.254/32"
-
-// EnsureFiles writes squid.conf, and the allowlist and learn list if missing.
+// EnsureFiles writes squid.conf, and the allowlist and gate config if missing.
 func EnsureFiles() error {
 	if err := paths.Ensure(); err != nil {
 		return err
@@ -108,10 +112,10 @@ func EnsureFiles() error {
 			return err
 		}
 	}
-	if _, err := os.Stat(paths.LearnList()); os.IsNotExist(err) {
-		if err := os.WriteFile(paths.LearnList(), []byte(learnPlaceholder+"\n"), 0o644); err != nil {
-			return err
-		}
+	// Learn mode (allow-all per cage) was removed: drop its files from
+	// older installs so nothing can resurrect it.
+	for _, f := range []string{"learn.txt", "learn-cages.txt"} {
+		_ = os.Remove(filepath.Join(paths.KeeperEtc(), f))
 	}
 	return nil
 }
@@ -257,77 +261,6 @@ func prune(lines []string) []string {
 	return out
 }
 
-// --- learn mode ----------------------------------------------------------------
-//
-// Learn mode is recorded by cage name (learn-cages.txt) and rendered into
-// squid's src ACL (learn.txt) from the cages' current IPs. Keying by IP alone
-// is unsafe: cage IPs change on restart (Apple reassigns them), and a stale
-// entry would grant allow-all to whichever cage gets the address next.
-
-// LearnCages returns the cage names in learn mode.
-func LearnCages() map[string]bool {
-	out := map[string]bool{}
-	b, _ := os.ReadFile(paths.LearnCages())
-	for _, l := range strings.Split(string(b), "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			out[l] = true
-		}
-	}
-	return out
-}
-
-// SetLearn turns learn mode on or off for a cage. Call SyncLearn after.
-func SetLearn(cage string, on bool) error {
-	set := LearnCages()
-	if on {
-		set[cage] = true
-	} else {
-		delete(set, cage)
-	}
-	names := make([]string, 0, len(set))
-	for k := range set {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	body := strings.Join(names, "\n")
-	if body != "" {
-		body += "\n"
-	}
-	return os.WriteFile(paths.LearnCages(), []byte(body), 0o644)
-}
-
-// SyncLearn rewrites learn.txt from the running cages' current IPs (cage
-// name -> IP) and reports whether it changed (so squid needs a reload).
-func SyncLearn(running map[string]string) (bool, error) {
-	set := LearnCages()
-	var ips []string
-	for name, ip := range running {
-		if set[name] && ip != "" {
-			ips = append(ips, ip+"/32")
-		}
-	}
-	sort.Strings(ips)
-	body := strings.Join(append([]string{learnPlaceholder}, ips...), "\n") + "\n"
-	old, _ := os.ReadFile(paths.LearnList())
-	if string(old) == body {
-		return false, nil
-	}
-	return true, os.WriteFile(paths.LearnList(), []byte(body), 0o644)
-}
-
-// LearnIPs returns cage IPs currently allowed everything by squid.
-func LearnIPs() map[string]bool {
-	out := map[string]bool{}
-	b, _ := os.ReadFile(paths.LearnList())
-	for _, l := range strings.Split(string(b), "\n") {
-		l = strings.TrimSpace(l)
-		if l != "" && l != learnPlaceholder {
-			out[strings.TrimSuffix(l, "/32")] = true
-		}
-	}
-	return out
-}
-
 // --- the keeper instance -------------------------------------------------------
 
 type State struct {
@@ -391,7 +324,7 @@ func Up(ctx context.Context, b backend.Backend, g config.Global) (string, error)
 	return ip, nil
 }
 
-// Reload tells squid to re-read the allowlist and learn list.
+// Reload tells squid to re-read the allowlist.
 func Reload(ctx context.Context, b backend.Backend) error {
 	var out bytes.Buffer
 	code, err := b.Exec(ctx, backend.ExecSpec{

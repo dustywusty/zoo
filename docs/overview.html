@@ -78,9 +78,9 @@ tr:last-child td { border-bottom: 0; }
 <h2>What it does</h2>
 <div class="grid">
   <div class="cell"><h3><i class="dot" style="background:var(--accent)"></i>Cages</h3><p>One sandbox per worktree: a VM on Apple <span class="mono">container</span>, or a container on Docker/OrbStack/Podman. CPU, memory and process limits; every capability dropped; agents run unprivileged.</p></div>
-  <div class="cell"><h3><i class="dot" style="background:var(--green)"></i>Keeper</h3><p>squid on its own instance, the only thing a cage can reach. Default-deny allowlist by hostname, per-cage learn mode, every request logged.</p></div>
+  <div class="cell"><h3><i class="dot" style="background:var(--green)"></i>Keeper</h3><p>squid on its own instance, the only thing a cage can reach. Default-deny allowlist by hostname, private addresses always refused, every new host approved by hand, every request logged.</p></div>
   <div class="cell"><h3><i class="dot" style="background:var(--green)"></i>Gate &amp; services</h3><p>Next to squid in the keeper. Forwards granted services (<span class="mono">pg.zoo</span>, <span class="mono">redis.zoo</span>, <span class="mono">github.com:22</span>) only to cages holding a grant.</p></div>
-  <div class="cell"><h3><i class="dot" style="background:var(--amber)"></i>Guarded worktree</h3><p>Secrets like <span class="mono">.env</span> and <span class="mono">*.pem</span> read empty. <span class="mono">.git/hooks</span> and <span class="mono">.git/config</span> are read-only and pinned, so nothing the agent writes runs on your Mac.</p></div>
+  <div class="cell"><h3><i class="dot" style="background:var(--amber)"></i>Guarded worktree</h3><p>Secrets like <span class="mono">.env</span> and <span class="mono">*.pem</span> read empty. <span class="mono">.git/hooks</span>, <span class="mono">.git/config</span>, other worktrees and submodules are read-only and pinned; repositories the agent plants in the worktree are flagged before your git runs them.</p></div>
   <div class="cell"><h3><i class="dot" style="background:var(--amber)"></i>Keys stay home</h3><p>An SSH-agent proxy in front of Bitwarden or 1Password: granted keys only, signs only for allowed hosts, optional approval on the dashboard. Vault secrets are fetched per session on the host.</p></div>
   <div class="cell"><h3><i class="dot" style="background:var(--muted)"></i>Dashboard</h3><p>Loopback-only, token-guarded. Cages, isolation level, resources, grants, approvals and one feed of everything that left a cage.</p></div>
 </div>
@@ -146,7 +146,7 @@ tr:last-child td { border-bottom: 0; }
   <text class="s" x="376" y="130">the only reachable thing</text>
   <rect x="376" y="142" width="168" height="48" rx="6" fill="#141416" stroke="#2c2c31"/>
   <text class="t" x="388" y="162" style="font-size:12px">squid :3128</text>
-  <text class="s" x="388" y="178">allowlist · learn · access.log</text>
+  <text class="s" x="388" y="178">allowlist · access.log</text>
   <rect x="376" y="200" width="168" height="54" rx="6" fill="#141416" stroke="#2c2c31"/>
   <text class="t" x="388" y="220" style="font-size:12px">zoo-gate</text>
   <text class="s" x="388" y="236">per-service ports · grants</text>
@@ -254,11 +254,11 @@ tr:last-child td { border-bottom: 0; }
 <table>
   <tr><th>From → to</th><th>Allowed</th><th>Enforced by</th></tr>
   <tr><td>cage → internet</td><td class="no">never directly</td><td>internal network: no default route, no DNS (<span class="mono">--no-dns</span> / <span class="mono">--dns 127.0.0.1</span>)</td></tr>
-  <tr><td>cage → web host</td><td class="yes">allowlisted only</td><td>squid CONNECT by hostname, <span class="mono">dstdomain -n</span> (no PTR tricks), ports 80/443 only, per-cage learn mode</td></tr>
+  <tr><td>cage → web host</td><td class="yes">allowlisted only</td><td>squid CONNECT by hostname, <span class="mono">dstdomain -n</span> (no PTR tricks), ports 80/443 only, private / loopback / metadata addresses refused</td></tr>
   <tr><td>cage → service</td><td class="yes">granted only</td><td>zoo-gate per-port allow list of cage IPs; zood re-checks the grant on the bridge</td></tr>
   <tr><td>cage → your mac</td><td class="warn">apple: gateway visible</td><td>docker: unreachable. apple: anything bound to <span class="mono">0.0.0.0</span> is reachable (apple/container#1320); doctor reports it. Host services go through the bridge, so they can stay on loopback</td></tr>
   <tr><td>cage → other cage</td><td class="yes">docker: no</td><td>docker: one internal network per cage. apple: shared network (no live network attach)</td></tr>
-  <tr><td>cage → host files</td><td class="yes">worktree only</td><td>bind mount at the same path; secrets masked; <span class="mono">.git</span> hooks/config read-only; dirs pinned against rename</td></tr>
+  <tr><td>cage → host files</td><td class="yes">worktree only</td><td>bind mount at the same path; secrets masked; <span class="mono">.git</span> hooks, config, worktrees/ and modules/ read-only; dirs pinned against rename; planted repos detected host-side</td></tr>
   <tr><td>cage → your keys</td><td class="yes">signatures, not keys</td><td>agent proxy: key filter, <span class="mono">session-bind</span> host check, approval, log; key never leaves the vault</td></tr>
   <tr><td>cage → credentials</td><td class="warn">model token only</td><td>env file 0600, deleted within seconds, never on argv; vault sessions never enter a cage</td></tr>
   <tr><td>anything → dashboard</td><td class="no">no</td><td>loopback bind, Host header check, token on writes; doctor checks cages can't reach it</td></tr>
@@ -306,7 +306,7 @@ const SEQS = [
       [1, 1, "plan: worktree root, masks, git guard, pins, size", "note"],
       [1, 2, "create cage: caps dropped, internal net, ro mounts", "ac"],
       [2, 4, "VM / container up", "ok"],
-      [1, 3, "gate.json: this cage's grants · learn ACL", "ac"],
+      [1, 3, "gate.json: this cage's grants", "ac"],
       [1, 4, "/etc/hosts ← pg.zoo, keys.zoo (as guest root)", "ac"],
       [1, 1, "token from Keychain/vault → env file 0600", "note"],
       [1, 4, "exec -u agent --env-file … zoo-session claude", "ac"],
