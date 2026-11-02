@@ -115,7 +115,7 @@ def fake_net():
             "url": host + ":443", "host": host, "status": 403 if denied else 200,
             "squid": "TCP_DENIED" if denied else "TCP_TUNNEL", "bytes_in": 0 if denied else random.randint(900, 900_000),
             "bytes_out": random.randint(300, 9000), "ms": 0 if denied else random.randint(20, 1600),
-            "denied": denied, "cage": c["name"], "first_seen": first, "allowlisted": not denied, "learn": bool(c.get("learn"))}
+            "denied": denied, "cage": c["name"], "first_seen": first, "allowlisted": not denied}
 
 
 def ticker():

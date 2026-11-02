@@ -189,7 +189,7 @@ kbd { font-family: var(--mono); font-size: 11px; line-height: 16px; padding: 0 5
 .c-dest .why { font-family: var(--sans); color: var(--red); font-size: 12px; margin-left: 10px; }
 .tag { font-family: var(--sans); font-size: 11px; font-weight: 550; margin-left: 8px; padding: 1px 6px; border-radius: 5px; }
 .tag.new { color: var(--accent); background: var(--accent-soft); }
-.tag.learn, .tag.unl { color: var(--amber); background: var(--amber-soft); }
+.tag.unl { color: var(--amber); background: var(--amber-soft); }
 .c-v { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .c-v.no { color: var(--red); font-weight: 550; }
 .c-n { text-align: right; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -463,7 +463,7 @@ function cageShell(c) {
   return `<div class="cage-top"><i class="dot ${c.running ? "ok" : "idle"}"></i><span class="cage-name">${esc(c.name)}</span>
       ${c.running ? `<button class="btn ghost sm danger" data-stop="${esc(c.id)}" data-name="${esc(c.name)}">Stop</button>` : ""}</div>
     <div class="cage-path" title="${esc(c.worktree)}"><bdi>${esc(shortPath(c.worktree))}</bdi></div>
-    <div class="chips">${iso}${c.learn ? `<span class="chip warn" title="Unlisted hosts are allowed and recorded">learn mode</span>` : ""}<span class="chip">${esc(c.size || "custom")}</span></div>
+    <div class="chips">${iso}<span class="chip">${esc(c.size || "custom")}</span></div>
     ${c.running ? `<div class="meters"></div>` : `<div class="stopped-note">${esc(c.status || "stopped")}</div>`}
     <div class="cage-sub">
       ${c.running ? `<div class="kv"><span class="k">Agents</span><span class="v">${sessions || `<span class="muted">none attached</span>`}</span></div>` : ""}
@@ -619,8 +619,8 @@ function rowHTML(e, fresh) {
   if (e.k === "web") {
     const path = r.method === "CONNECT" ? "" : (() => { try { const u = new URL(r.url); return u.pathname + u.search; } catch { return ""; } })();
     const onList = listed(e.host);
-    // Only flag what matters: first contact, and allowed traffic that isn't on the allowlist (learned or otherwise).
-    const tags = (r.first_seen ? `<span class="tag new">new</span>` : "") + (!e.denied && !onList ? (r.learn ? `<span class="tag learn" title="Allowed by learn mode">learned</span>` : `<span class="tag unl">not listed</span>`) : "");
+    // Only flag what matters: first contact, and allowed traffic that isn't on the allowlist .
+    const tags = (r.first_seen ? `<span class="tag new">new</span>` : "") + (!e.denied && !onList ? `<span class="tag unl">not listed</span>` : "");
     dest = `${esc(e.host)}${path ? `<span class="p">${esc(path.length > 80 ? path.slice(0, 80) + "…" : path)}</span>` : ""}${tags}`;
     verdict = e.denied ? "denied" : esc(r.status || "ok");
     if (!onList && e.host) act = `<button class="btn sm" data-allow-host="${esc(e.host)}">Allow</button>`;

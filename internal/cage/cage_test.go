@@ -94,13 +94,37 @@ func TestPlanWorktree(t *testing.T) {
 			t.Errorf("linked worktree pointer %s must be read-only: %v", want, pl.ReadOnly)
 		}
 	}
-	// Every directory between a mount root and a protected path is pinned so
-	// it can't be renamed out from under the read-only mounts.
-	pins := strings.Join(pl.Pin, ",")
-	for _, want := range []string{filepath.Join(common, "worktrees"), gitDir} {
-		if !strings.Contains(","+pins+",", ","+want+",") {
-			t.Errorf("missing pin %s: %v", want, pl.Pin)
+	// Every other worktree's gitdir and every submodule's git dir is
+	// read-only: rewriting another worktree's commondir points the host's
+	// git at a config the agent wrote.
+	roSet := map[string]bool{}
+	for _, p := range pl.ReadOnly {
+		roSet[p] = true
+	}
+	for _, want := range []string{
+		filepath.Join(common, "worktrees"), filepath.Join(common, "modules"),
+		filepath.Join(gitDir, "modules"), filepath.Join(gitDir, "config.worktree"),
+	} {
+		if !roSet[want] {
+			t.Errorf("%s must be read-only: %v", want, pl.ReadOnly)
 		}
+		if _, err := os.Stat(want); err != nil {
+			t.Errorf("plan must create %s so it can be mounted read-only (else the agent creates it): %v", want, err)
+		}
+	}
+	// ... except this worktree's own gitdir (HEAD, index), reopened rw.
+	if len(pl.ReopenRW) != 1 || pl.ReopenRW[0] != gitDir {
+		t.Errorf("own gitdir must be reopened rw: %v", pl.ReopenRW)
+	}
+	// Those are mount points already, so they can't be renamed; pinning them
+	// rw as well would undo the read-only mount.
+	for _, p := range pl.Pin {
+		if roSet[p] || p == gitDir {
+			t.Errorf("%s is both pinned rw and read-only/reopened", p)
+		}
+	}
+	if spec := pl.Spec(g, "", nil); len(spec.ReopenRW) != 1 {
+		t.Errorf("spec drops ReopenRW: %v", spec.ReopenRW)
 	}
 	spec := pl.Spec(g, "192.168.64.2", map[string]string{"zoo.backend": "fake"})
 	if spec.CPUs != 4 || spec.Memory != "4G" || spec.Pids != 2048 || spec.Labels["zoo.backend"] != "fake" || spec.Labels[LabelWorktree] != root {
@@ -137,7 +161,13 @@ func TestPlanMainCheckoutPinsGitDir(t *testing.T) {
 	if len(pl.Pin) != 1 || pl.Pin[0] != filepath.Join(root, ".git") {
 		t.Errorf("want .git pinned (else `mv .git .git2` escapes the read-only mounts): %v", pl.Pin)
 	}
-	if st, err := os.Stat(filepath.Join(root, ".git", "hooks")); err != nil || !st.IsDir() {
-		t.Error("plan must create a missing .git/hooks so the agent can't")
+	for _, d := range []string{"hooks", "worktrees", "modules"} {
+		p := filepath.Join(root, ".git", d)
+		if st, err := os.Stat(p); err != nil || !st.IsDir() {
+			t.Errorf("plan must create a missing .git/%s so the agent can't", d)
+		}
+		if !strings.Contains(","+strings.Join(pl.ReadOnly, ",")+",", ","+p+",") {
+			t.Errorf(".git/%s must be read-only: %v", d, pl.ReadOnly)
+		}
 	}
 }

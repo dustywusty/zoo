@@ -449,6 +449,25 @@ var behaviors = []behavior{
 		if ri < wi {
 			t.Errorf("read-only file mounted before the worktree:%s", dump())
 		}
+		// A read-only dir, a dir reopened rw inside it, and a read-only file
+		// inside that: runtimes that apply mounts in order (apple) need them
+		// in exactly this order; docker orders by depth, which agrees.
+		wts := filepath.Join(gitDir, "worktrees")
+		mine := filepath.Join(wts, "mine")
+		cdir := filepath.Join(mine, "commondir")
+		di, d := mountAt(c, wts)
+		oi, o := mountAt(c, mine)
+		fi, f := mountAt(c, cdir)
+		switch {
+		case d == nil || !d.ReadOnly || d.Source != wts:
+			t.Errorf("%s not mounted read-only:%s", wts, dump())
+		case o == nil || o.ReadOnly || o.Source != mine:
+			t.Errorf("%s not reopened rw:%s", mine, dump())
+		case f == nil || !f.ReadOnly:
+			t.Errorf("%s not mounted read-only:%s", cdir, dump())
+		case !(di < oi && oi < fi):
+			t.Errorf("want ro dir < reopened dir < ro file, got %d %d %d:%s", di, oi, fi, dump())
+		}
 		if r.Source != cfg {
 			// A staged copy (apple) must have the same content and must not
 			// live in the pinned dir.
@@ -773,6 +792,9 @@ func TestContract(t *testing.T) {
 			mkfile(t, filepath.Join(h.repo, ".gitmodules"), "")
 			mkfile(t, filepath.Join(h.repo, ".git", "config"), "[core]\n\tbare = false\n")
 			mkfile(t, filepath.Join(h.repo, ".git", "hooks", "pre-commit.sample"), "#!/bin/sh\n")
+			// Linked worktrees' gitdirs: all read-only but this cage's own.
+			mkfile(t, filepath.Join(h.repo, ".git", "worktrees", "other", "commondir"), "../..\n")
+			mkfile(t, filepath.Join(h.repo, ".git", "worktrees", "mine", "commondir"), "../..\n")
 			h.buildCtx = filepath.Join(tmp, "image")
 			mkfile(t, filepath.Join(h.buildCtx, "Dockerfile"), "FROM scratch\n")
 			etc, logs := filepath.Join(tmp, "etc"), filepath.Join(tmp, "log")
@@ -795,8 +817,11 @@ func TestContract(t *testing.T) {
 					// A file directly in the worktree root (a linked
 					// worktree's .git file): must not cost the worktree mount.
 					filepath.Join(h.repo, ".gitmodules"),
+					filepath.Join(h.repo, ".git", "worktrees"),
+					filepath.Join(h.repo, ".git", "worktrees", "mine", "commondir"),
 				},
-				Pin: []string{filepath.Join(h.repo, ".git")},
+				Pin:      []string{filepath.Join(h.repo, ".git")},
+				ReopenRW: []string{filepath.Join(h.repo, ".git", "worktrees", "mine")},
 			}
 			h.cage2 = backend.CageSpec{
 				ID: "zoo-contract-2", Image: "zoo-cage:latest", CPUs: 1, Memory: "512M", Pids: 128,

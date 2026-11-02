@@ -311,14 +311,6 @@ func cmdStatus() error {
 	} else {
 		row("shims", "not on PATH (zoo shims install)")
 	}
-	learn := keeper.LearnCages()
-	if len(learn) > 0 {
-		names := make([]string, 0, len(learn))
-		for n := range learn {
-			names = append(names, n)
-		}
-		row("learn mode", strings.Join(names, ", "))
-	}
 	row("version", version)
 	return tw.Flush()
 }

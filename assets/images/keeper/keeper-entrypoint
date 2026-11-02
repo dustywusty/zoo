@@ -4,7 +4,7 @@
 # where the zoo daemon tails it.
 #
 # squid must not be PID 1: `squid -k reconfigure` (how zoo applies allowlist
-# and learn-mode changes) refuses a pid file that says 1. So this shell stays
+# changes) refuses a pid file that says 1. So this shell stays
 # PID 1, forwards stop signals, and exits when squid does.
 set -eu
 mkdir -p /var/log/zoo /var/spool/squid /run/squid

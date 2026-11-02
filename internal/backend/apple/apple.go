@@ -278,7 +278,7 @@ func (a *Apple) RunArgs(s backend.CageSpec) ([]string, error) {
 		}
 	}
 	// Directories mounted as directories: the worktree, extra rw dirs, pins,
-	// and read-only dirs.
+	// read-only dirs and dirs reopened rw inside them.
 	dirMounted := map[string]bool{}
 	for _, m := range s.Mounts {
 		dirMounted[m.Source] = true
@@ -286,14 +286,39 @@ func (a *Apple) RunArgs(s backend.CageSpec) ([]string, error) {
 	for _, p := range s.Pin {
 		dirMounted[p] = true
 	}
+	for _, p := range s.ReopenRW {
+		dirMounted[p] = true
+	}
+	isDir := func(p string) bool {
+		st, err := os.Stat(p)
+		return err == nil && st.IsDir()
+	}
 	for _, p := range s.ReadOnly {
-		if st, err := os.Stat(p); err == nil && st.IsDir() {
+		if isDir(p) {
 			dirMounted[p] = true
 		}
 	}
+	// `container` applies mounts in order, so: read-only dirs, then the rw
+	// dirs reopened inside them, then read-only files (which may sit inside
+	// a reopened dir).
+	for _, p := range backend.Existing(s.ReadOnly) {
+		if isDir(p) {
+			if err := vol(p, p, true); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, p := range backend.Existing(s.ReopenRW) {
+		if err := vol(p, p, false); err != nil {
+			return nil, err
+		}
+	}
 	for i, p := range backend.Existing(s.ReadOnly) {
+		if isDir(p) {
+			continue
+		}
 		src := p
-		if st, err := os.Stat(p); err == nil && !st.IsDir() && dirMounted[filepath.Dir(p)] {
+		if dirMounted[filepath.Dir(p)] {
 			// `container` shares a file mount's parent directory and can then
 			// drop a directory mount of that same source; seen undoing a pin
 			// on 1.6.1. Mount a staged read-only copy instead; host edits show

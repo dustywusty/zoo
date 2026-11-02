@@ -39,7 +39,6 @@ type NetEvent struct {
 	Cage        string `json:"cage"`
 	FirstSeen   bool   `json:"first_seen"`  // first time this cage reached this host
 	Allowlisted bool   `json:"allowlisted"` // host is on the allowlist right now
-	Learn       bool   `json:"learn"`       // cage was in learn mode
 }
 
 type Alert struct {
@@ -139,6 +138,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.loop(ctx, 2*time.Second, s.pollStats)
 	go s.loop(ctx, 5*time.Second, s.refreshAllowlist)
 	go s.loop(ctx, 2*time.Second, s.broadcastState)
+	go s.loop(ctx, 30*time.Second, s.scanGitTraps)
 	go s.tail(ctx, start)
 	go s.tailGate(ctx)
 	go s.runBridge(ctx)
@@ -178,18 +178,6 @@ func (s *Server) pollCages() {
 	cs, err := cage.List(ctx, s.backend)
 	kc, kok, _ := s.backend.Get(ctx, keeper.Name)
 	if err == nil {
-		// Keep learn mode attached to cages whose IPs changed.
-		running := map[string]string{}
-		for _, c := range cs {
-			if c.Running {
-				running[c.Name] = c.IP
-			}
-		}
-		if changed, _ := keeper.SyncLearn(running); changed && kok && kc.Running {
-			if rerr := keeper.Reload(ctx, s.backend); rerr != nil {
-				log.Printf("keeper reload after learn sync: %v", rerr)
-			}
-		}
 		s.syncServices(cs)
 	}
 	s.mu.Lock()
@@ -304,10 +292,9 @@ func (s *Server) cageForIP(ip string) string {
 }
 
 func (s *Server) ingest(e keeper.Event, live bool) {
-	learn := keeper.LearnIPs()
 	s.mu.Lock()
 	s.nextID++
-	ev := NetEvent{ID: s.nextID, Event: e, Cage: s.cageForIP(e.Client), Learn: learn[e.Client]}
+	ev := NetEvent{ID: s.nextID, Event: e, Cage: s.cageForIP(e.Client)}
 	ev.Allowlisted = keeper.Allowed(s.allowlist, e.Host)
 	if s.seen[ev.Cage] == nil {
 		s.seen[ev.Cage] = map[string]bool{}
@@ -350,6 +337,34 @@ func (s *Server) ingest(e keeper.Event, live bool) {
 
 	if live {
 		s.publish("net", ev)
+		for _, a := range alerts {
+			s.publish("alert", a)
+			go s.notify(a)
+		}
+	}
+}
+
+// scanGitTraps looks for repositories planted in running cages' worktrees
+// (see cage.GitTraps) and raises a critical alert for each new one, so you
+// hear about it before your shell prompt or editor runs git there.
+func (s *Server) scanGitTraps() {
+	s.mu.Lock()
+	cages := append([]cage.Info(nil), s.cages...)
+	s.mu.Unlock()
+	for _, c := range cages {
+		if !c.Running || c.Worktree == "" {
+			continue
+		}
+		traps, _ := cage.GitTraps(c.Worktree)
+		var alerts []Alert
+		s.mu.Lock()
+		for _, t := range traps {
+			if s.once("gittrap|"+t.Path+"|"+t.Reason, 24*time.Hour) {
+				alerts = append(alerts, s.newAlert("crit", c.Name, "Planted git repository",
+					fmt.Sprintf("%s (%s). Running git there, or opening it in an editor or a shell with a git prompt, can run commands the agent chose. Inspect and delete it.", t.Path, t.Reason)))
+			}
+		}
+		s.mu.Unlock()
 		for _, a := range alerts {
 			s.publish("alert", a)
 			go s.notify(a)
@@ -430,7 +445,6 @@ type cageView struct {
 	Stat     *Stat     `json:"stat,omitempty"`
 	Counts   Counts    `json:"counts"`
 	Sessions []Session `json:"sessions"`
-	Learn    bool      `json:"learn"`
 }
 
 type stateView struct {
@@ -445,7 +459,6 @@ type stateView struct {
 }
 
 func (s *Server) snapshot() stateView {
-	learn := keeper.LearnIPs()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := stateView{
@@ -467,7 +480,7 @@ func (s *Server) snapshot() stateView {
 	grants := s.svc.grants
 	s.svc.mu.Unlock()
 	for _, c := range s.cages {
-		cv := cageView{Info: c, Learn: c.IP != "" && learn[c.IP], Grants: grants[c.Name]}
+		cv := cageView{Info: c, Grants: grants[c.Name]}
 		if st, ok := s.stats[c.ID]; ok {
 			st := st
 			cv.Stat = &st
@@ -598,11 +611,6 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	for _, c := range s.snapshot().Cages {
-		if c.ID == id {
-			_ = keeper.SetLearn(c.Name, false)
-		}
-	}
 	if err := s.backend.Stop(ctx, id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

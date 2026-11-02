@@ -365,8 +365,21 @@ func (d *Docker) RunArgs(s backend.CageSpec) []string {
 			args = append(args, "--mount", mountArg(p, p, false))
 		}
 	}
+	// Read-only dirs, dirs reopened rw inside them, then read-only files
+	// (which may sit inside a reopened dir). Docker orders mounts by target
+	// depth anyway; the argument order matches it for runtimes that don't.
 	for _, p := range s.ReadOnly {
+		if isDir(p) {
+			args = append(args, "--mount", mountArg(p, p, true))
+		}
+	}
+	for _, p := range s.ReopenRW {
 		if exists(p) {
+			args = append(args, "--mount", mountArg(p, p, false))
+		}
+	}
+	for _, p := range s.ReadOnly {
+		if exists(p) && !isDir(p) {
 			args = append(args, "--mount", mountArg(p, p, true))
 		}
 	}
@@ -381,6 +394,11 @@ func (d *Docker) RunArgs(s backend.CageSpec) []string {
 func exists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+func isDir(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.IsDir()
 }
 
 func (d *Docker) CreateCage(ctx context.Context, s backend.CageSpec) error {

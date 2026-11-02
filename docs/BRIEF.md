@@ -93,7 +93,7 @@ Every backend, every release. The escape suite (section 16.3) tests these. If a 
 |---|---|
 | I1 | **One way out.** A cage's only network path to the internet is the keeper. No default route, no NAT, no external DNS. |
 | I2 | **Keeper outside the blast radius.** The keeper's config, allowlist and logs live outside every cage and can't be modified from inside one. |
-| I3 | **Default deny.** A host not on the effective allowlist is refused and logged. Learn mode is per-cage, explicit, visible, and expires when turned off or the cage resets. |
+| I3 | **Default deny.** A host not on the effective allowlist is refused and logged. There is no allow-all mode: every new host is approved by a human (dashboard Allow or `zoo allow`). Private, loopback, link-local and CGNAT destinations are refused even for allowlisted names (D24). |
 | I4 | **Everything logged.** Every request through the keeper is recorded with time, cage (and agent, once M5 lands), method, host, verdict, bytes in/out, duration. |
 | I5 | **No host secrets inside.** Nothing from the host enters a cage except the worktree (and, for git worktrees, the repo's git dir). No `$HOME`, SSH keys, cloud creds, keychain, Docker socket, or host env leaks in. |
 | I6 | **Worktree secrets masked.** Files matching mask patterns (`.env*`, `*.pem`, `*.key`, `id_*`, `.npmrc`, `.netrc`, …) read as empty inside the cage, and the agent can't unmask them. |
@@ -144,7 +144,7 @@ Every backend, every release. The escape suite (section 16.3) tests these. If a 
 | **harness** | An agent CLI (Claude Code, Codex, pi, …). |
 | **session** | One harness process running in a cage. |
 | **shim** | A script on `PATH` named like a harness (`claude`) that runs it inside the right cage. |
-| **learn mode** | Per-cage allow-all-and-log, to discover what a repo needs. |
+| **learn mode** | Removed (D24). Was per-cage allow-all-and-log; replaced by approving blocked hosts by hand (`zoo blocked`, dashboard Allow). |
 | **sentinel** | The rule engine that raises alerts. |
 | **escape suite** | The set of checks proving the invariants hold (`zoo doctor`, extended). |
 | **door** | A way an orchestrator reaches a cage: shim, SSH, or direct. |
@@ -159,7 +159,7 @@ v0 was written in one sitting and **tested only against a fake `container` CLI**
 
 ```
 cmd/zoo/main.go            CLI: up/down/run/shell/ls/stop/reset/allow/deny/allowlist/
-                           learn/learned/keys/shims/doctor/dash/build/daemon/version
+                           blocked/keys/shims/doctor/dash/build/daemon/version
 assets/
   assets.go                go:embed of images/, WriteImage() copies a build context out
   images/cage/Dockerfile   node:22-bookworm-slim + git, rg, jq, python3, uv, claude-code, codex;
@@ -176,7 +176,7 @@ internal/
   backend/  Backend interface; apple/ (container CLI, ZOO_CONTAINER_BIN), docker/ (docker|podman, ZOO_DOCKER_BIN)
   jsonx/    tolerant JSON digging (container CLI JSON isn't a stable contract)
   cage/     plan (worktree root, git dirs, masks, read-only paths, size), run args, ensure, list, find
-  keeper/   squid.conf, allowlist (normalize/allow/deny/prune), learn list, keeper VM up/reload, log parsing
+  keeper/   squid.conf, allowlist (normalize/allow/deny/prune), keeper VM up/reload, log parsing
   keys/     macOS Keychain (service "zoo"); file fallback (ZOO_KEYS_FILE=1) elsewhere
   shims/    PATH shims with ZOO=off / ZOO_INSIDE escape
   daemon/   log tailer, stats poller (heuristic field matching), sessions, sentinel (deny, bytes-out),
@@ -195,8 +195,8 @@ Makefile                   build / test / install / dist (darwin/arm64)
 
 ### 6.3 Tested
 
-- Unit: allowlist normalize/allow/deny/prune, learn list, log parsing, mask discovery, git-worktree plan, run args, tolerant JSON.
-- End to end against a fake `container` CLI: up, keys, run (env file contents, args), ls, live log ingest, attribution, alerts, sessions, restart backfill, learn on/off, doctor rendering, shims including `ZOO=off`, dashboard guard (403 on foreign Host / missing token).
+- Unit: allowlist normalize/allow/deny/prune, squid ACL order, log parsing, mask discovery, git-worktree plan, planted-repository scan, run args, tolerant JSON.
+- End to end against a fake `container` CLI: up, keys, run (env file contents, args), ls, live log ingest, attribution, alerts, sessions, restart backfill, doctor rendering, shims including `ZOO=off`, dashboard guard (403 on foreign Host / missing token).
 - `shellcheck` on in-image scripts; JS syntax check of the dashboard.
 
 ### 6.4 Not yet verified on real hardware (M0 must verify)
@@ -236,7 +236,7 @@ Makefile                   build / test / install / dist (darwin/arm64)
 ┌──────────────────────────────── host ───────────────────────────────────────────┐
 │  zoo CLI ──► zood (daemon)                                                       │
 │               ├─ Backend driver (apple | docker[runc|runsc|kata] | lima | k8s | fc)│
-│               ├─ Keeper manager (squid config, allowlists, learn, reload)        │
+│               ├─ Keeper manager (squid config, allowlists, reload)               │
 │               ├─ Ingest: keeper log · resource sampler · file watcher ·          │
 │               │          guest sensor (vsock) · harness OTel (OTLP)              │
 │               ├─ Correlator + sentinel (rules → alerts → ntfy/Slack)             │
@@ -324,7 +324,7 @@ Tables (DuckDB preferred; SQLite acceptable if DuckDB cgo is a problem for cross
 
 - `cages(id, name, backend, isolation, worktree, size, created_at, deleted_at, labels json)`
 - `sessions(id, cage_id, agent_user, harness, host_pid, started_at, ended_at, exit_code)`
-- `net_events(ts, cage_id, agent, client_ip, method, host, url, status, squid_code, bytes_in, bytes_out, ms, denied, learn, allowlisted, first_seen)`
+- `net_events(ts, cage_id, agent, client_ip, method, host, url, status, squid_code, bytes_in, bytes_out, ms, denied, allowlisted, first_seen)`
 - `resource_samples(ts, cage_id, cpu_pct, mem_used, mem_limit, net_rx, net_tx, blk_r, blk_w, pids)`
 - `file_events(ts, cage_id, path, op, size, sha256?)`
 - `proc_events(ts, cage_id, agent, pid, ppid, uid, exe, argv_redacted, op)` (M8)
@@ -434,10 +434,13 @@ acl SSL_ports port 443
 acl Safe_ports port 80 443
 acl CONNECT method CONNECT
 acl zoo_allowed dstdomain "/etc/zoo/allowlist.txt"
-acl zoo_learn src "/etc/zoo/learn.txt"
+acl zoo_private_name dstdomain -n .localhost .internal .local
+acl zoo_private dst 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3
+acl zoo_private dst ::1/128 64:ff9b::/96 fc00::/7 fe80::/10 ff00::/8
 http_access deny !Safe_ports
 http_access deny CONNECT !SSL_ports
-http_access allow zoo_learn
+http_access deny zoo_private_name
+http_access deny zoo_private
 http_access allow zoo_allowed
 http_access deny all
 logformat zoo %ts.%03tu %>a %rm %ru %>Hs %Ss %<st %>st %tr
@@ -469,15 +472,15 @@ acl allow_<name> dstdomain "/etc/zoo/cages/<name>.txt"
 http_access allow cage_<name> allow_<name>
 ```
 
-Regenerated on cage start/stop and on rule changes; `squid -k reconfigure` (no dropped sessions). Each rule records scope, who added it (cli/dashboard/learn), when, optional reason. The dashboard's Allow button offers **this project** (default) or **everywhere**.
+Regenerated on cage start/stop and on rule changes; `squid -k reconfigure` (no dropped sessions). Each rule records scope, who added it (cli/dashboard), when, optional reason. The dashboard's Allow button offers **this project** (default) or **everywhere**.
 
 ### 9.4 Per-agent identity — M5
 
 Each agent session gets a random proxy credential; `HTTPS_PROXY=http://<agent-id>:<secret>@keeper:3128`. squid `auth_param basic` with an htpasswd file zood maintains (`basic_ncsa_auth`, APR1 hashes; generator in Go, test against `openssl passwd -apr1`). Log `%un`. Unauthenticated requests from a cage are denied once all harnesses are verified to support proxy auth (Claude Code, Codex, git, npm, pip, uv, curl). Until then, fall back to per-cage attribution with a dashboard note.
 
-### 9.5 Learn mode
+### 9.5 Learn mode (removed)
 
-`zoo run --learn` / `zoo learn on|off`. Per-cage src ACL with `http_access allow` before the allowlist. Dashboard shows an amber "learn mode" badge on the cage and marks learned requests. `zoo learned` lists hosts reached outside the allowlist; Allow buttons promote them (default scope: project). Learn mode turns off on `zoo stop`/`reset`.
+Removed in D24. A new repo's first run hits walls; the human approves blocked hosts with the dashboard's Allow or `zoo blocked` + `zoo allow`. The keeper reloads on every approval, so agents just retry.
 
 ### 9.6 Upgrades beyond squid (only with a Decision Log entry)
 
@@ -614,12 +617,12 @@ v0 is one static page. M7 replaces it with TypeScript + React (Vite), embedded v
 
 ### 12.1 Views
 
-1. **Cages** (v0 basic): card per cage: name, worktree, backend + **isolation level badge**, size, status, live CPU / memory / disk / network vs limits, sessions (harness + agent), request/deny counts, learn badge. Actions: stop, reset, resize, learn on/off, open shell (copies command), open SSH (M6).
-2. **Network** (v0 basic): live feed across cages; search (terms AND'd, `-term` excludes, `host:` `cage:` `status:` prefixes at M3); filters: cage, verdict (all/allowed/denied/new/learned), time range (M3); pause; per-session destinations with first-seen markers; bytes-out over time per host; deny queue with Allow (this project / everywhere / ignore).
+1. **Cages** (v0 basic): card per cage: name, worktree, backend + **isolation level badge**, size, status, live CPU / memory / disk / network vs limits, sessions (harness + agent), request/deny counts, planted-repo alerts. Actions: stop, reset, resize, open shell (copies command), open SSH (M6).
+2. **Network** (v0 basic): live feed across cages; search (terms AND'd, `-term` excludes, `host:` `cage:` `status:` prefixes at M3); filters: cage, verdict (all/allowed/denied/new), time range (M3); pause; per-session destinations with first-seen markers; bytes-out over time per host; deny queue with Allow (this project / everywhere / ignore).
 3. **Resources** (M4): per-cage and whole-host charts over time; "right-size" hints from observed peaks.
 4. **Sessions** (M7): list per cage; AG-UI timeline per session interleaving prompts, tool calls (args/results), and the network/process/file events they caused; click a denied request → jump to the tool call behind it.
 5. **Alerts** (v0 strip, M3 full): filter, ack, evidence, jump to timeline.
-6. **Allowlist** (M2): rules with scope, origin, date, reason; edit; learned candidates.
+6. **Allowlist** (M2): rules with scope, origin, date, reason; edit; blocked candidates.
 7. **Settings / Doctor** (M3): run the escape suite per cage and show results; backend status.
 
 ### 12.2 API
@@ -630,7 +633,7 @@ Add as needed, versioned under `/api/v1/…` once the React UI lands; keep the v
 ### 12.3 UX rules
 
 - Fast on 10k+ events: virtualized table, server-side filtering beyond the last 5k.
-- Never hide that a cage runs at weaker isolation or in learn mode.
+- Never hide that a cage runs at weaker isolation.
 - Every alert explains *why* in one line and links to evidence.
 - Keyboard: `/` search, `Esc` clear, `p` pause, `j/k` move.
 
@@ -692,7 +695,6 @@ harness: claude
 allow: [api.stripe.com]
 mask: ["config/*.secret.json"]
 unmask: [".env.test"]
-learn: false
 ```
 
 Config is validated on load with clear errors (path + key + expected).
@@ -828,7 +830,7 @@ Append new decisions at the bottom. Format: `D<n> (date): decision — why — a
 - **D10 (2026-10-28): Docker backend uses host-side masking.** Lets cages run with `--cap-drop ALL`; guest-side masking reserved for VM backends without file mounts.
 - **D11 (2026-10-28): Apple uses host-side masking too, and cages drop all capabilities.** Verified on 1.6.1: the guest root has Docker's default capability set (no CAP_SYS_ADMIN), so v0's in-guest bind mounts failed; `-v file:path:ro` works (`--mount` rejects files). A file `-v` shares its parent directory with the guest, reachable only with CAP_SYS_ADMIN, so the mask file lives alone in `~/.zoo/mask/`. Rejected: `--cap-add CAP_SYS_ADMIN` for zoo-init (gives the guest the power to undo the masks).
 - **D12 (2026-10-28): Pin directories that hold protected paths.** Every directory between a mount root and a read-only path is mounted onto itself, because a rename carries nested read-only mounts away (`mv .git .git2`, then write a fresh `.git/config` the host runs). On Apple a directory mount is dropped when the same directory is the parent of a file mount, so read-only files inside pinned directories are mounted from a staged copy under `~/.zoo/stage/<cage>/` (host edits visible after `zoo reset`). Rejected: making `.git` wholly read-only (agents must commit).
-- **D13 (2026-10-28): Learn mode is keyed by cage name**, rendered into squid's src ACL from current IPs on every cage start/stop and daemon poll. Apple reassigns IPs on restart.
+- **D13 (2026-10-28, superseded by D24): Learn mode is keyed by cage name**, rendered into squid's src ACL from current IPs on every cage start/stop and daemon poll. Apple reassigns IPs on restart.
 - **D14 (2026-10-28): Docker cages keep a writable root filesystem** (parity with Apple), not `--read-only` + tmpfs home: Docker tmpfs mounts are `noexec` by default and the image's pre-seeded agent home would be hidden. Persistence is per cage and cleared by `zoo reset`. Revisit with M5 per-agent homes.
 - **D15 (2026-10-28): Docker keeper sits on zoo's own `zoo-egress` bridge**, not the default `bridge`, so unrelated containers can't use it as a proxy. Keeper keeps CHOWN/SETUID/SETGID/DAC_OVERRIDE/FOWNER (squid drops to `proxy`), everything else dropped.
 - **D17 (2026-10-28): Image tags are versioned (`zoo-cage:m1`, `zoo-keeper:m1`), and instances carry a `zoo.image` label.** On `zoo up` a keeper from another image is replaced (it's stateless); a stopped cage from another image is recreated on its next run; a running one gets a warning to `zoo reset` it. This is how v0 installs pick up the fixed guard and keeper without manual steps. Bump the tag when images or expected mounts change.
@@ -838,6 +840,7 @@ Append new decisions at the bottom. Format: `D<n> (date): decision — why — a
 - **D21 (2026-10-28): The gate runs unprivileged; service ports below 1024 move up by 20000** (github.com:22 → 20022, with an ssh_config entry so `git@github.com:` works unchanged).
 - **D22 (2026-10-28): The SSH agent proxy refuses signs with no `session-bind` when a service restricts hosts.** Means OpenSSH ≥ 8.9 in the cage (Debian bookworm has 9.2) and no commit signing on host-restricted keys; unrestricted keys still sign. Every list/sign is logged; private keys never leave the host agent.
 - **D23 (2026-10-28): Docker internal networks get no host address** (`inhibit_ipv4`). Found by the escape suite in CI: on Linux, the bridge gateway is the host, reachable on every port it listens on. Existing zoo networks are replaced when unused.
+- **D24 (2026-11-02): Red-team fixes. No learn mode; private destinations refused; the git guard covers every worktree and submodule; planted repositories are detected on the host.** (a) Learn mode allowed any destination, including `host.docker.internal` (the host's loopback on Docker Desktop and OrbStack), the LAN and cloud metadata; the owner prefers approving each host by hand, so it's gone and `zoo blocked` lists the queue. (b) squid denies private, loopback, link-local, CGNAT (tailnets) and multicast addresses, and `.localhost`/`.internal`/`.local` names, before the allowlist, so an allowlisted name resolving to a private address is refused. `::ffff:0:0/96` and `::/128` are deliberately absent: squid stores IPv4 as v4-mapped, so they read as 0.0.0.0/0. (c) `.git/worktrees` and `.git/modules` (and a linked worktree's own `modules/`) are read-only, with this worktree's own gitdir reopened rw on top (`CageSpec.ReopenRW`; mount order ro dirs, reopened dirs, ro files). Before, a cage could rewrite another worktree's `commondir` or a submodule's config and the host's git would run what it pointed at. An empty `config.worktree` is created so it can be mounted ro. (d) Mounts can't stop the agent writing `sub/.git`, a `.git` file pointing at its own git dir (under a forged gitlink, `git status` at the top level recurses into it) or a bare repo, any of which bring a config the host's git, prompt or editor would honour. `cage.GitTraps` finds them on the host: after each `zoo run` session, every 30 s in the daemon (critical alert), and in `zoo doctor` (fails). Detection, not prevention; `safe.bareRepository=explicit` closes the bare variant. Images bumped to m3 so existing cages are recreated with the new mounts.
 - **D16 (2026-10-28): `zoo up --backend X --isolation-floor Y` is remembered in `~/.zoo/state.json`** so later commands and the daemon agree; a plain `zoo up` clears the remembered floor. Precedence: flag > env (`ZOO_BACKEND`, `ZOO_ISOLATION_FLOOR`) > config `backend` (non-auto) > remembered > auto; floor: flag > env > remembered > config.
 
 ---
@@ -918,7 +921,7 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 
 **v0 (done, tested against fakes)**
 - [x] Apple backend via `container` CLI (create, start, exec, list, stats, stop, delete)
-- [x] Keeper VM (squid) on two networks; allowlist; learn mode; reload
+- [x] Keeper VM (squid) on two networks; allowlist; reload (learn mode removed in D24)
 - [x] Cage planning: worktree root, git worktree dirs, masks, read-only git paths, sizes
 - [x] Keychain credentials; env-file injection; file injection via stdin
 - [x] Shims with `ZOO=off`
@@ -1016,6 +1019,7 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 - 2026-10-28: M0 verified on container 1.6.1. Fixed: in-guest masks/git guard silently failed (no CAP_SYS_ADMIN); squid -k reconfigure failed (squid was PID 1); `.git` rename bypassed the git guard; linked-worktree `.git` file and `commondir` were writable; IP-keyed learn mode leaked across cages on IP reuse; squid matched IP-literal CONNECTs by PTR name (now `dstdomain -n`).
 - 2026-10-28: M2S: services (host, sidecar, remote, ssh-agent), grants, gate, host bridge, SSH agent proxy, Bitwarden/1Password secret sources, per-cage networks on docker, dashboard refresh. Fixed: squid stale pid file wedged keeper restarts.
 - 2026-10-28: M1: `internal/backend` with `apple`, `docker`, `podman`; host-side guard on all backends; isolation floor; `zoo backend`, `zoo status`; escape suite PASS on OrbStack and Apple.
+- 2026-11-02: Red-team pass (D24): learn mode removed (`zoo blocked` instead); keeper refuses private destinations; git guard extended to all worktrees and submodules; host-side planted-repository detection in run, daemon and doctor. Squid config verified on bookworm squid; Linux unit and contract tests pass. Escape suite on Apple not yet re-run.
 
 ---
 

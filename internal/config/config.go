@@ -106,8 +106,8 @@ func Defaults() Global {
 		BytesOutAlert: 5 << 20,
 		// Bump the tag when the images or the mounts they expect change:
 		// zoo rebuilds missing images and replaces instances on an old tag.
-		CageImage:      "zoo-cage:m2",
-		KeeperImage:    "zoo-keeper:m2",
+		CageImage:      "zoo-cage:m3",
+		KeeperImage:    "zoo-keeper:m3",
 		Network:        "zoo-cages",
 		Backend:        "auto",
 		IsolationFloor: "microvm",

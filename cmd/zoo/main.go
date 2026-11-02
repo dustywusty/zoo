@@ -48,7 +48,6 @@ Usage:
   zoo run [harness] [flags] [-- args]
                                  run an agent (default: claude) in this worktree's cage
       --size S                   tiny | small | medium | large | cpus:memory (e.g. 3:6G)
-      --learn                    allow all egress for this cage, logged, until "zoo learn off"
   zoo shell [cage]               bash in a cage (default: this worktree's)
   zoo ls                         list cages
   zoo stop <cage|all>            stop a cage (the worktree is untouched)
@@ -56,8 +55,7 @@ Usage:
   zoo allow <host...>            allow hosts for every cage (".example.com" = subdomains too)
   zoo deny <host...>             remove hosts from the allowlist
   zoo allowlist                  print the allowlist
-  zoo learn on|off [cage]        toggle learn mode for a cage
-  zoo learned [cage]             hosts reached in learn mode that aren't on the allowlist
+  zoo blocked [cage]             hosts the keeper refused that aren't allowlisted (approve with zoo allow)
   zoo keys set|rm <name>         store a credential in the Keychain (e.g. "claude", "codex")
   zoo keys ls                    which harness credentials are stored
   zoo shims install|uninstall    put claude/codex/... shims on PATH so other tools land in cages
@@ -111,10 +109,8 @@ func main() {
 		err = cmdDeny(args)
 	case "allowlist":
 		err = cmdAllowlist()
-	case "learn":
-		err = cmdLearn(args)
-	case "learned":
-		err = cmdLearned(args)
+	case "blocked":
+		err = cmdBlocked(args)
 	case "keys":
 		err = cmdKeys(args)
 	case "shims":
@@ -293,7 +289,6 @@ func cmdDown(args []string) error {
 		for _, c := range cs {
 			if c.Running {
 				say("stopping %s", c.Name)
-				_ = keeper.SetLearn(c.Name, false)
 				_ = e.b.Stop(ctx, c.ID)
 			}
 		}
@@ -403,7 +398,6 @@ func cmdDash() error {
 type runOpts struct {
 	harness string
 	size    string
-	learn   bool
 	rest    []string
 }
 
@@ -422,7 +416,6 @@ func parseRun(args []string) (runOpts, error) {
 	}
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.StringVar(&o.size, "size", "", "cage size")
-	fs.BoolVar(&o.learn, "learn", false, "learn mode")
 	if err := fs.Parse(pre); err != nil {
 		return o, err
 	}
@@ -575,21 +568,12 @@ or pass --allow-weaker-isolation for one run, or use a stronger backend (zoo bac
 		e.info.Caps.Isolation, paths.Config())
 }
 
-// syncKeeper re-renders squid's learn ACL and the gate's grants from the
-// cages' current IPs, and starts granted sidecars.
+// syncKeeper re-renders the gate's grants from the cages' current IPs, and
+// starts granted sidecars.
 func syncKeeper(ctx context.Context, e env) {
 	cs, err := cage.List(ctx, e.b)
 	if err != nil {
 		return
-	}
-	running := map[string]string{}
-	for _, c := range cs {
-		if c.Running {
-			running[c.Name] = c.IP
-		}
-	}
-	if changed, err := keeper.SyncLearn(running); err == nil && changed {
-		reloadIfUp(ctx, e)
 	}
 	if _, err := services.Sync(ctx, e.b, e.g, cs); err != nil {
 		say("services: %v", err)
@@ -624,13 +608,6 @@ func runIn(o runOpts, cageName string) error {
 			_ = keeper.Reload(ctx, e.b)
 		}
 	}
-	if o.learn {
-		if err := keeper.SetLearn(pl.Name, true); err == nil {
-			syncKeeper(ctx, e)
-			say("learn mode ON for %s: all egress allowed and logged. `zoo learned` to review, `zoo learn off` to end", pl.Name)
-		}
-	}
-
 	env := append([]string{
 		"HOME=/home/agent", "USER=agent", "ZOO_CAGE=" + pl.Name, "ZOO_INSIDE=1",
 		"TERM=" + envOr("TERM", "xterm-256color"), "COLORTERM=" + os.Getenv("COLORTERM"), "LANG=" + envOr("LANG", "en_US.UTF-8"),
@@ -700,6 +677,7 @@ func runIn(o runOpts, cageName string) error {
 	// Remove the env file once the CLI has read it.
 	go func() { time.Sleep(3 * time.Second); cleanup() }()
 	code, err := e.b.Exec(ctx, spec)
+	warnGitTraps(pl.Root)
 	if err != nil {
 		return err
 	}
@@ -707,6 +685,23 @@ func runIn(o runOpts, cageName string) error {
 		return exitCode(code)
 	}
 	return nil
+}
+
+// warnGitTraps tells the user, loudly, about repositories planted in a
+// worktree (see cage.GitTraps) before they run git there.
+func warnGitTraps(root string) {
+	traps, complete := cage.GitTraps(root)
+	if !complete {
+		say("couldn't finish scanning %s for planted git repositories (too many files)", root)
+	}
+	if len(traps) == 0 {
+		return
+	}
+	say("WARNING: found %d planted git repository(s) in %s.", len(traps), root)
+	say("Running git there (or opening it in an editor, or a shell with a git prompt) can run commands the agent chose. Inspect, then delete:")
+	for _, t := range traps {
+		fmt.Fprintf(os.Stderr, "    %s  (%s)\n", t.Path, t.Reason)
+	}
 }
 
 // exitCode passes an agent's exit status through to zoo's.
@@ -823,15 +818,11 @@ func cmdLs() error {
 		fmt.Println("no cages yet. In a repo: zoo run claude")
 		return nil
 	}
-	learn := keeper.LearnCages()
 	home, _ := os.UserHomeDir()
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "CAGE\tSTATUS\tISOLATION\tSIZE\tIP\tWORKTREE")
 	for _, c := range cs {
 		st := c.Status
-		if learn[c.Name] {
-			st += " (learn)"
-		}
 		iso := c.Isolation
 		if iso == "" {
 			iso = "?"
@@ -874,7 +865,6 @@ func cmdStop(args []string) error {
 		for _, c := range cs {
 			if c.Running {
 				say("stopping %s", c.Name)
-				_ = keeper.SetLearn(c.Name, false)
 				if err := e.b.Stop(ctx, c.ID); err != nil {
 					say("%v", err)
 				}
@@ -886,7 +876,6 @@ func cmdStop(args []string) error {
 	if err != nil {
 		return err
 	}
-	_ = keeper.SetLearn(c.Name, false)
 	return e.b.Stop(ctx, c.ID)
 }
 
@@ -907,7 +896,6 @@ func cmdReset(args []string) error {
 	if err != nil {
 		return err
 	}
-	_ = keeper.SetLearn(c.Name, false)
 	if err := e.b.Delete(ctx, c.ID); err != nil {
 		return err
 	}
@@ -916,7 +904,7 @@ func cmdReset(args []string) error {
 	return nil
 }
 
-// --- allowlist / learn ------------------------------------------------------------
+// --- allowlist / blocked ----------------------------------------------------------
 
 func reloadIfUp(ctx context.Context, e env) {
 	if c, ok, _ := e.b.Get(ctx, keeper.Name); ok && c.Running {
@@ -1002,35 +990,9 @@ func currentOrNamed(ctx context.Context, e env, args []string) (cage.Info, error
 	return cage.Find(ctx, e.b, wd)
 }
 
-func cmdLearn(args []string) error {
-	if len(args) == 0 || (args[0] != "on" && args[0] != "off") {
-		return errors.New("usage: zoo learn on|off [cage]")
-	}
-	g, err := loadCfg()
-	if err != nil {
-		return err
-	}
-	ctx := context.Background()
-	e, err := resolve(ctx, g)
-	if err != nil {
-		return err
-	}
-	c, err := currentOrNamed(ctx, e, args[1:])
-	if err != nil {
-		return err
-	}
-	if err := keeper.SetLearn(c.Name, args[0] == "on"); err != nil {
-		return err
-	}
-	syncKeeper(ctx, e)
-	if args[0] == "on" && !c.Running {
-		say("%s isn't running; learn mode starts with its next run", c.Name)
-	}
-	say("learn mode %s for %s", strings.ToUpper(args[0]), c.Name)
-	return nil
-}
-
-func cmdLearned(args []string) error {
+// cmdBlocked lists hosts the keeper refused that still aren't allowlisted:
+// the approval queue for a new repo's first run.
+func cmdBlocked(args []string) error {
 	g, err := loadCfg()
 	if err != nil {
 		return err
@@ -1059,7 +1021,7 @@ func cmdLearned(args []string) error {
 	sc.Buffer(make([]byte, 64*1024), 1<<20)
 	for sc.Scan() {
 		e, ok := keeper.ParseLine(sc.Text())
-		if !ok || e.Denied || e.Host == "" {
+		if !ok || !e.Denied || e.Host == "" {
 			continue
 		}
 		if ip != "" && e.Client != ip {
@@ -1070,7 +1032,7 @@ func cmdLearned(args []string) error {
 		}
 	}
 	if len(counts) == 0 {
-		fmt.Println("nothing learned outside the allowlist")
+		fmt.Println("nothing blocked that isn't allowlisted now")
 		return nil
 	}
 	hosts := make([]string, 0, len(counts))
@@ -1286,6 +1248,16 @@ func cmdDoctor(args []string) error {
 	}
 	if g.Port > 0 {
 		fmt.Println(paint("32", "  ✓ ") + fmt.Sprintf("dashboard: bound to 127.0.0.1:%d only", g.Port))
+	}
+	if traps, complete := cage.GitTraps(pl.Root); len(traps) > 0 {
+		fails++
+		for _, t := range traps {
+			fmt.Println(paint("31", "  ✗ ") + fmt.Sprintf("git-traps: %s (%s); delete it before running git there", t.Path, t.Reason))
+		}
+	} else if !complete {
+		fmt.Println(paint("33", "  ! ") + "git-traps: scan stopped early (too many files)")
+	} else {
+		fmt.Println(paint("32", "  ✓ ") + "git-traps: no planted repositories in the worktree")
 	}
 	if !shims.OnPath() {
 		fmt.Println(paint("33", "  ! ") + "shims: not on PATH, so Conductor/herdr launch agents outside cages (zoo shims install)")

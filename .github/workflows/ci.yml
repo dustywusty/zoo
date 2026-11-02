@@ -46,6 +46,14 @@ jobs:
         run: |
           test -z "$($GITHUB_WORKSPACE/zoo run shell -- -c 'cat .env')"
           grep -q SECRET=1 .env
+      - name: a repository planted by the agent is caught on the host
+        working-directory: /tmp/repo
+        run: |
+          $GITHUB_WORKSPACE/zoo run shell -- -c 'mkdir -p planted/.git'
+          if $GITHUB_WORKSPACE/zoo doctor > /tmp/doctor.txt 2>&1; then cat /tmp/doctor.txt; exit 1; fi
+          grep -q 'git-traps: /tmp/repo/planted/.git (nested repository)' /tmp/doctor.txt
+          rm -rf planted
+          $GITHUB_WORKSPACE/zoo doctor
       - name: floor refuses container isolation by default
         working-directory: /tmp/repo
         run: |
