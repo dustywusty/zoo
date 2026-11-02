@@ -84,6 +84,7 @@ zoo dash                    # open the dashboard
 | `zoo stop <cage\|all>` / `zoo reset <cage>` | Stop a cage / delete it so the next run starts clean |
 | `zoo allow <host…>` / `zoo deny <host…>` / `zoo allowlist` | Edit the allowlist (`.example.com` = domain + subdomains) |
 | `zoo blocked [cage]` | Hosts the keeper refused that aren't allowlisted: your approval queue |
+| `zoo refs [ok] [cage]` | Branches and tags the cage moved besides its own, with undo commands; `ok` accepts them |
 | `zoo keys set\|rm <name>` / `zoo keys ls` | Harness credentials in the Keychain |
 | `zoo shims install` | PATH shims so other tools land in cages |
 | `zoo doctor [cage]` | Check every wall from inside a cage |
@@ -116,7 +117,8 @@ unmask: [".env.test"]            # files the defaults would hide but this repo n
 | | |
 |---|---|
 | Read/write your worktree | Yes |
-| See `.env*`, `*.pem`, `*.key`, `id_*`, `.npmrc`, `.netrc` in the worktree | No: replaced by empty read-only files |
+| See secret files in the worktree: `.env*`, keys and keystores, cloud/kube credentials, `*.tfvars`/`*.tfstate`, `secrets.*`, `.envrc`, `.npmrc`, `.netrc` (any depth to 12, build output included; dependency dirs skipped) | No: replaced by empty read-only files. Over 512 matches, zoo refuses to start the cage rather than hide only some |
+| Move a branch other than its own (`main`, `origin/*`, tags) | Can't be blocked (refs are shared), so it's reported: at the end of each `zoo run`, on the dashboard, in `zoo doctor` and `zoo refs`, with the command to undo it |
 | Write `.git/hooks` or `.git/config` (things that run on your Mac later) | No: read-only, and `.git` can't be renamed to get around that |
 | Redirect another worktree's git, or a submodule's (`.git/worktrees/*`, `.git/modules`) | No: read-only; only this worktree's own gitdir is writable |
 | Plant a repository in the worktree (`sub/.git`, a bare repo, a `.git` file pointing elsewhere) | Can't be blocked, so it's caught: `zoo run` warns when the session ends, the dashboard alerts within 30 s, `zoo doctor` fails. Don't run git in a flagged dir; delete it |
@@ -211,11 +213,11 @@ Approvals apply to running cages immediately; the agent just retries.
 
 - **Your Mac's open ports are visible to cages.** On an internal network the host gateway is still reachable ([apple/container#1320](https://github.com/apple/container/issues/1320)), so anything on your Mac bound to `0.0.0.0` is reachable from a cage. `zoo doctor` lists them. Common culprit: AirPlay Receiver (ports 5000/7000): turn it off in System Settings → General → AirDrop & Handoff. Bind dev servers to `127.0.0.1`.
 - **Allowed hosts can still carry data out** (e.g. a gist on github.com, using a token the attacker supplies). The bytes-out alert is the tripwire, and it won't notice a few KB.
-- **Branches are shared.** The cage writes the repo's refs, so an agent can move any branch (`main`, or `origin/*` so it looks pushed). Check `git log` before you push something you didn't watch it make.
+- **Branch moves are reported, not prevented**, and zoo can't tell who moved a ref: a `git fetch` you run on the host while a cage is running shows up too. Accept those with `zoo refs ok`. Repos using reftable ref storage aren't watched.
 - **Planted repositories are detected, not prevented.** The dashboard scans every 30 s, so a shell prompt or editor running git in the worktree *while* the agent works can beat it. Setting `safe.bareRepository=explicit` in your global git config closes the bare-repo variant for good.
 - **Submodules are read-only in cages** (`.git/modules`): update them on the host.
 - **Attribution is per cage**, not per agent, when several agents share a cage.
-- **Masks are fixed when a cage is created.** A secret file added on the host later is hidden after `zoo reset`. On Apple, edits you make to `.git/config` on the host also show up in the cage only after `zoo reset` (the cage sees a read-only copy).
+- **Masks are fixed while a cage runs.** A secret file added later is readable in a running cage (`zoo run` warns); the next start re-masks. On Apple, edits you make to `.git/config` on the host also show up in the cage only after `zoo reset` (the cage sees a read-only copy).
 - **Docker/Podman cages share a kernel** (isolation `container`), which is why the floor refuses them by default. On macOS that kernel is OrbStack's or Docker Desktop's VM, not your Mac's.
 - **`nproc` inside a Docker cage shows all host CPUs**; the CPU limit is a quota, not a CPU set.
 - **No disk limit per cage yet**, and no Docker-inside-the-cage yet.

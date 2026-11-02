@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -36,6 +37,7 @@ const (
 	LabelIso      = "zoo.isolation"
 	LabelWeaker   = "zoo.weaker-isolation" // set when started below the isolation floor
 	LabelImage    = "zoo.image"            // image the cage was created from
+	LabelMasks    = "zoo.masks"            // fingerprint of the masked files: secrets added later mean a stale cage
 )
 
 // Plan is everything needed to create a cage for one worktree.
@@ -228,7 +230,11 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 		}
 	}
 
-	pl.Masks = FindMasks(root, append(append([]string{}, g.Masks...), p.Mask...), append(append([]string{}, g.Unmask...), p.Unmask...))
+	masks, complete := FindMasksAll(root, append(append([]string{}, g.Masks...), p.Mask...), append(append([]string{}, g.Unmask...), p.Unmask...))
+	if !complete {
+		return Plan{}, fmt.Errorf("more than %d secret-looking files in %s: zoo won't start a cage that hides only some of them. Add the ones that aren't secret (test fixtures, sample keys) to unmask: in zoo.yaml", MaxMasks, root)
+	}
+	pl.Masks = masks
 	return pl, nil
 }
 
@@ -331,39 +337,70 @@ func (pl Plan) Guarded() []string {
 	return out
 }
 
+// skipDirs are dependency trees: huge, and holding other people's code
+// rather than this project's secrets. Build outputs are NOT skipped: they
+// copy secrets around (Next.js standalone output carries .env files).
 var skipDirs = map[string]bool{
 	".git": true, "node_modules": true, "vendor": true, ".venv": true, "venv": true,
-	"dist": true, "build": true, "target": true, ".next": true, ".turbo": true, ".cache": true,
+	"target": true, "__pycache__": true, ".gradle": true, ".terraform": true,
 }
 
-// FindMasks walks the worktree (depth 6, at most 256 hits) for secret-looking files.
+// Mask scan bounds. Past MaxMasks the cage isn't started at all (failing
+// closed beats hiding only some secrets); it's also about as many mounts as
+// fit on a Windows command line.
+const (
+	maskDepth = 12
+	MaxMasks  = 512
+)
+
+// FindMasks walks the worktree for secret-looking files (see FindMasksAll).
 func FindMasks(root string, masks, unmask []string) []string {
-	var out []string
+	out, _ := FindMasksAll(root, masks, unmask)
+	return out
+}
+
+// FindMasksAll walks the worktree (to depth maskDepth, skipping dependency
+// trees) for secret-looking files. complete is false when it found more
+// than MaxMasks.
+func FindMasksAll(root string, masks, unmask []string) (out []string, complete bool) {
+	complete = true
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, p)
 		if d.IsDir() {
-			if p != root && (skipDirs[d.Name()] || strings.Count(rel, string(filepath.Separator)) >= 6) {
+			if p != root && (skipDirs[d.Name()] || strings.Count(rel, string(filepath.Separator)) >= maskDepth) {
 				return filepath.SkipDir
 			}
 			return nil
-		}
-		if len(out) >= 256 {
-			return filepath.SkipAll
 		}
 		base := d.Name()
 		if match(unmask, base) {
 			return nil
 		}
 		if match(masks, base) || matchRel(masks, rel) {
+			if len(out) >= MaxMasks {
+				complete = false
+				return filepath.SkipAll
+			}
 			out = append(out, p)
 		}
 		return nil
 	})
 	sort.Strings(out)
-	return out
+	return out, complete
+}
+
+// foldCase: macOS and Windows file systems ignore case by default, so
+// .ENV is as secret as .env there.
+var foldCase = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+
+func fold(s string) string {
+	if foldCase {
+		return strings.ToLower(s)
+	}
+	return s
 }
 
 func match(patterns []string, name string) bool {
@@ -371,23 +408,39 @@ func match(patterns []string, name string) bool {
 		if strings.Contains(pat, "/") {
 			continue
 		}
-		if ok, _ := filepath.Match(pat, name); ok {
+		if ok, _ := path.Match(fold(pat), fold(name)); ok {
 			return true
 		}
 	}
 	return false
 }
 
-// matchRel matches patterns written with "/" (config/*.secret.json) against
-// a worktree-relative path, whatever the OS separator.
+// matchRel matches patterns written with "/" (config/*.secret.json,
+// .kube/config) against a worktree-relative path, whatever the OS
+// separator. They match at any depth (apps/api/.kube/config) unless they
+// start with "/", which anchors them to the worktree root.
 func matchRel(patterns []string, rel string) bool {
-	rel = filepath.ToSlash(rel)
+	rel = fold(filepath.ToSlash(rel))
 	for _, pat := range patterns {
 		if !strings.Contains(pat, "/") {
 			continue
 		}
-		if ok, _ := path.Match(pat, rel); ok {
-			return true
+		pat = fold(pat)
+		if anchored, ok := strings.CutPrefix(pat, "/"); ok {
+			if m, _ := path.Match(anchored, rel); m {
+				return true
+			}
+			continue
+		}
+		for tail := rel; ; {
+			if m, _ := path.Match(pat, tail); m {
+				return true
+			}
+			i := strings.IndexByte(tail, '/')
+			if i < 0 {
+				break
+			}
+			tail = tail[i+1:]
 		}
 	}
 	return false
@@ -411,6 +464,7 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 		LabelCPUs:     fmt.Sprint(pl.Size.CPUs),
 		LabelMemory:   pl.Size.Memory,
 		LabelImage:    g.CageImage,
+		LabelMasks:    MasksFingerprint(pl.Masks),
 	}
 	for k, v := range labels {
 		l[k] = v
@@ -439,7 +493,7 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 // Stale reports whether an existing cage predates the current image (and so
 // may lack the mounts this zoo relies on, e.g. v0 cages' guard).
 func Stale(st backend.Status, spec backend.CageSpec) bool {
-	return st.Labels[LabelImage] != spec.Image
+	return st.Labels[LabelImage] != spec.Image || MasksChanged(st, spec)
 }
 
 // Ensure creates or starts the cage. Returns true if it was (re)created.
@@ -562,4 +616,25 @@ func Find(ctx context.Context, b backend.Backend, q string) (Info, error) {
 		return Info{}, fmt.Errorf("%q matches %d cages; be more specific", q, len(hits))
 	}
 	return Info{}, fmt.Errorf("no cage %q (see zoo ls)", q)
+}
+
+// MasksFingerprint identifies a set of masked files, so a cage created
+// before a secret file appeared can be told apart (masks are mounts, fixed
+// when the cage is created).
+func MasksFingerprint(masks []string) string {
+	s := append([]string(nil), masks...)
+	sort.Strings(s)
+	sum := sha1.Sum([]byte(strings.Join(s, "\n")))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+// MasksChanged reports whether the secret files a cage hides differ from
+// what it should hide now. A cage from before fingerprints counts as
+// changed only if there's something to mask.
+func MasksChanged(st backend.Status, spec backend.CageSpec) bool {
+	have, ok := st.Labels[LabelMasks]
+	if !ok {
+		return len(spec.Masks) > 0
+	}
+	return have != spec.Labels[LabelMasks]
 }

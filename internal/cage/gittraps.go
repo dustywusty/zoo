@@ -154,3 +154,9 @@ func cachedGitPaths(root string) (string, string) {
 	gitPathCache.m[root] = gitPathEntry{common, gitDir, time.Now()}
 	return common, gitDir
 }
+
+// GitDirs returns a worktree's common git dir and its own git dir (the same
+// for a main checkout), cached like the trap scan's.
+func GitDirs(root string) (common, gitDir string) {
+	return cachedGitPaths(filepath.Clean(root))
+}
