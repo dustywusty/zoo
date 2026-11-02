@@ -44,9 +44,20 @@ func TestDaemonReadsUseTheAPI(t *testing.T) {
 		t.Fatalf("host bridge: %s %s %v", listen, dial, err)
 	}
 
-	// Stats: one stream per running zoo container, read from memory.
+	// Stats: one stream per running zoo container, read from memory. A
+	// stream's first sample has no CPU rate yet (it needs two readings), so
+	// wait for one that has.
 	var samples []backend.Sample
-	for i := 0; i < 50 && len(samples) < 2; i++ {
+	withCPU := func() bool {
+		n := 0
+		for _, s := range samples {
+			if s.Have["cpu"] {
+				n++
+			}
+		}
+		return n == 2
+	}
+	for i := 0; i < 100 && !withCPU(); i++ {
 		samples, err = d.Sample(ctx)
 		if err != nil {
 			t.Fatal(err)
