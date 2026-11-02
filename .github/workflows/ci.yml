@@ -16,10 +16,10 @@ jobs:
       - run: go test ./...
       - run: shellcheck -s bash assets/images/cage/zoo-doctor && shellcheck -s sh assets/images/cage/zoo-init assets/images/keeper/keeper-entrypoint
 
-  # Windows: paths, process handling (no console windows: D25), the docker
-  # API client over a real named pipe. keys and sshagent still assume Unix
-  # (phases 2-3 of Windows support). No Linux containers on these runners,
-  # so the escape suite on Windows is run by hand.
+  # Windows: the whole suite, natively (named pipes for docker and SSH
+  # agents, Credential Manager, exe shims, no console windows: D25). No
+  # Linux containers on these runners, so the escape suite on Windows is
+  # run by hand.
   windows-unit:
     runs-on: windows-latest
     steps:
@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: "1.24" }
       - run: go vet ./...
-      - run: go test ./assets/... ./cmd/... ./internal/proc/... ./internal/backend/... ./internal/cage/... ./internal/keeper/... ./internal/services/... ./internal/jsonx/... ./internal/gitrefs/...
+      - run: go test ./...
 
   # M1 gate: docker backend, escape suite inside a real cage.
   docker-escape-suite:

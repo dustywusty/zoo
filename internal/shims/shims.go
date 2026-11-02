@@ -37,6 +37,9 @@ func Install(harnesses []string, zooBin string) ([]string, error) {
 		return nil, err
 	}
 	sort.Strings(harnesses)
+	if exeShims {
+		return installExe(harnesses, zooBin)
+	}
 	var out []string
 	for _, h := range harnesses {
 		if h == "shell" {
@@ -54,6 +57,9 @@ func Install(harnesses []string, zooBin string) ([]string, error) {
 
 // Uninstall removes shims zoo wrote.
 func Uninstall() ([]string, error) {
+	if exeShims {
+		return uninstallExe(), nil
+	}
 	ents, err := os.ReadDir(paths.Shims())
 	if err != nil {
 		return nil, nil
@@ -74,7 +80,7 @@ func Uninstall() ([]string, error) {
 // OnPath reports whether the shim dir comes before other entries on PATH.
 func OnPath() bool {
 	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
-		if filepath.Clean(d) == filepath.Clean(paths.Shims()) {
+		if samePath(d, paths.Shims()) {
 			return true
 		}
 	}
