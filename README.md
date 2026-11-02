@@ -19,7 +19,7 @@ One of these backends:
 | Backend | Runs on | Isolation | Notes |
 |---|---|---|---|
 | `apple` | macOS 26+, Apple silicon, [`container`](https://github.com/apple/container/releases) | `vm`: a VM per cage | Default when installed. |
-| `docker` | OrbStack, Docker Desktop, colima, Docker Engine (macOS or Linux) | `container`: cages share one kernel | Set `docker.runtime: kata` (`microvm`) or `runsc` (`sandboxed-container`) on Linux for more. |
+| `docker` | OrbStack, Docker Desktop, colima, Docker Engine (macOS or Linux); Docker Desktop on Windows | `container`: cages share one kernel | Set `docker.runtime: kata` (`microvm`) or `runsc` (`sandboxed-container`) on Linux for more. |
 | `podman` | Podman (machine on macOS, native on Linux) | `container` | Same driver as docker. |
 
 Go 1.24+ to build from source.
@@ -39,6 +39,12 @@ zoo up --backend docker --isolation-floor container   # remembered for later com
 ```
 
 The isolation level is shown in `zoo ls`, `zoo status`, `zoo doctor` and on every dashboard card. `zoo backend use <name>` switches the default; cages on the old backend stay where they are.
+
+### Windows
+
+Docker Desktop (WSL 2 backend), with `--isolation-floor container`. Cages share Docker Desktop's Linux VM kernel, not Windows'. Your worktree appears inside the cage as `/c/Users/you/repo`; zoo rewrites git's pointer files for the cage (yours aren't touched) and passes your `core.autocrlf` through, so git in the cage sees the same clean tree you do. The dashboard daemon runs without a window and watches Docker through its API rather than launching `docker` repeatedly.
+
+Not on Windows yet: keychain storage (credentials fall back to 0600 files under `%USERPROFILE%\.zoo\keys`), shims for other tools (use `zoo run` directly), and SSH agent grants. Repos on network shares (`\\server\…`) can't be caged. Large `node_modules` trees are slow over Docker Desktop's file sharing.
 
 ## Install
 

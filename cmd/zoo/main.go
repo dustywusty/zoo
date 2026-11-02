@@ -34,6 +34,7 @@ import (
 	"github.com/dusty/zoo/internal/keeper"
 	"github.com/dusty/zoo/internal/keys"
 	"github.com/dusty/zoo/internal/paths"
+	"github.com/dusty/zoo/internal/proc"
 	"github.com/dusty/zoo/internal/services"
 	"github.com/dusty/zoo/internal/shims"
 )
@@ -202,8 +203,12 @@ func buildImage(ctx context.Context, b backend.Backend, which, tag string) error
 	}
 	args := map[string]string{}
 	if which == "cage" {
-		args["AGENT_UID"] = strconv.Itoa(os.Getuid())
-		args["AGENT_GID"] = strconv.Itoa(os.Getgid())
+		// Windows has no uid (Getuid is -1); Docker Desktop shows Windows
+		// files to every guest uid alike, so the image default is fine.
+		if uid, gid := os.Getuid(), os.Getgid(); uid >= 0 && gid >= 0 {
+			args["AGENT_UID"] = strconv.Itoa(uid)
+			args["AGENT_GID"] = strconv.Itoa(gid)
+		}
 	}
 	return b.BuildImage(ctx, backend.ImageSpec{Tag: tag, Context: dir, BuildArgs: args})
 }
@@ -325,7 +330,7 @@ func startDaemon(g config.Global) error {
 	defer logf.Close()
 	cmd := exec.Command(self, "daemon")
 	cmd.Stdout, cmd.Stderr = logf, logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	proc.Detach(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -347,9 +352,7 @@ func stopDaemon() {
 	}
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
 	if pid > 0 {
-		if p, err := os.FindProcess(pid); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
-		}
+		_ = proc.Terminate(pid)
 	}
 	_ = os.Remove(paths.DaemonPID())
 }
@@ -383,11 +386,17 @@ func cmdDash() error {
 		}
 	}
 	url := fmt.Sprintf("http://127.0.0.1:%d", g.Port)
-	opener := "open"
-	if runtime.GOOS != "darwin" {
-		opener = "xdg-open"
+	var open *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		open = exec.Command("open", url)
+	case "windows":
+		open = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		open = exec.Command("xdg-open", url)
 	}
-	if err := exec.Command(opener, url).Run(); err != nil {
+	proc.Quiet(open)
+	if err := open.Run(); err != nil {
 		fmt.Println(url)
 	}
 	return nil
@@ -668,7 +677,7 @@ func runIn(o runOpts, cageName string) error {
 
 	spec := backend.ExecSpec{
 		ID: pl.ID, Cmd: append([]string{"/usr/local/bin/zoo-session", h.Command}, o.rest...),
-		User: "agent", Workdir: workdir, EnvFile: envFile,
+		User: "agent", Workdir: backend.GuestPath(workdir), EnvFile: envFile,
 		TTY: isTerminal(os.Stdin) && isTerminal(os.Stdout),
 	}
 
@@ -1195,12 +1204,12 @@ func cmdDoctor(args []string) error {
 	}
 	var outb bytes.Buffer
 	code, runErr := e.b.Exec(ctx, backend.ExecSpec{
-		ID: pl.ID, User: "agent", Workdir: pl.Root, NoStdin: true,
+		ID: pl.ID, User: "agent", Workdir: backend.GuestPath(pl.Root), NoStdin: true,
 		Cmd: []string{"/usr/local/bin/zoo-doctor"},
 		Env: append([]string{
-			"ZOO_MASKS=" + strings.Join(pl.Masks, "\n"),
-			"ZOO_READONLY=" + strings.Join(pl.ReadOnly, "\n"),
-			"ZOO_PIN=" + strings.Join(pl.Pin, "\n"),
+			"ZOO_MASKS=" + strings.Join(backend.GuestPaths(pl.Masks), "\n"),
+			"ZOO_READONLY=" + strings.Join(backend.GuestPaths(pl.Guarded()), "\n"),
+			"ZOO_PIN=" + strings.Join(backend.GuestPaths(pl.Pin), "\n"),
 			"ZOO_KEEPER=" + ip,
 			"ZOO_DASH_PORT=" + strconv.Itoa(g.Port),
 			"ZOO_HOST_GATEWAY_EXPECTED=" + strconv.FormatBool(e.info.Caps.HostGatewayReachable),

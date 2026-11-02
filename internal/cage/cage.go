@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -18,6 +19,8 @@ import (
 	"github.com/dusty/zoo/internal/backend"
 	"github.com/dusty/zoo/internal/config"
 	"github.com/dusty/zoo/internal/keeper"
+	"github.com/dusty/zoo/internal/paths"
+	"github.com/dusty/zoo/internal/proc"
 )
 
 const Prefix = "zoo-"
@@ -37,14 +40,16 @@ const (
 
 // Plan is everything needed to create a cage for one worktree.
 type Plan struct {
-	Name     string   // short name, e.g. api-3fa2c1
-	ID       string   // container id, e.g. zoo-api-3fa2c1
-	Root     string   // worktree root on the host (and in the guest)
-	ExtraRW  []string // other host paths mounted rw (a worktree's main .git)
-	Masks    []string // secret files hidden inside the cage
-	ReadOnly []string // paths made read-only inside the cage
-	Pin      []string // directories mounted onto themselves so they can't be renamed
-	ReopenRW []string // dirs inside a read-only dir made writable again (this worktree's gitdir)
+	Name     string          // short name, e.g. api-3fa2c1
+	ID       string          // container id, e.g. zoo-api-3fa2c1
+	Root     string          // worktree root on the host (and in the guest)
+	ExtraRW  []string        // other host paths mounted rw (a worktree's main .git)
+	Masks    []string        // secret files hidden inside the cage
+	ReadOnly []string        // paths made read-only inside the cage
+	Pin      []string        // directories mounted onto themselves so they can't be renamed
+	ReopenRW []string        // dirs inside a read-only dir made writable again (this worktree's gitdir)
+	Files    []backend.Mount // read-only files shown with rewritten content (git pointers, Windows)
+	AutoCRLF string          // host's core.autocrlf, mirrored into the cage when paths differ (Windows)
 	SizeName string
 	Size     config.Size
 }
@@ -55,10 +60,14 @@ func Root(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out, err := exec.Command("git", "-C", abs, "rev-parse", "--show-toplevel").Output()
+	cmd := exec.Command("git", "-C", abs, "rev-parse", "--show-toplevel")
+	proc.Quiet(cmd)
+	out, err := cmd.Output()
 	if err == nil {
 		if top := strings.TrimSpace(string(out)); top != "" {
-			return top, nil
+			// Git for Windows answers C:/Users/...; keep one spelling so the
+			// cage name (a hash of the path) is stable.
+			return filepath.Clean(top), nil
 		}
 	}
 	return abs, nil
@@ -82,7 +91,9 @@ func NameFor(root string) string {
 
 // gitPaths returns the common .git dir and this worktree's git dir (absolute).
 func gitPaths(root string) (common, gitDir string) {
-	out, err := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir").Output()
+	cmd := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir")
+	proc.Quiet(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return "", ""
 	}
@@ -126,9 +137,11 @@ func exists(p string) bool {
 	return err == nil
 }
 
+// within reports whether path is dir or inside it. Rel's ".." uses the OS
+// separator (..\ on Windows), and paths on different drives don't relate.
 func within(path, dir string) bool {
 	rel, err := filepath.Rel(dir, path)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // NewPlan builds the plan for a worktree.
@@ -141,8 +154,14 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 	if err != nil {
 		return Plan{}, err
 	}
+	if err := backend.CheckGuestPath(root); err != nil {
+		return Plan{}, err
+	}
 	name := NameFor(root)
 	pl := Plan{Name: name, ID: Prefix + name, Root: root, SizeName: sn, Size: size}
+	if backend.GuestPath(root) != root {
+		pl.AutoCRLF = hostGitConfig(root, "core.autocrlf")
+	}
 
 	common, gitDir := gitPaths(root)
 	if common != "" {
@@ -198,9 +217,118 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 			pl.Pin = append(pl.Pin, d)
 		}
 	}
+	// Git's pointer files hold absolute host paths. Where the guest spells
+	// them differently (Windows: C:/Users/... -> /c/Users/...), the cage sees
+	// a read-only copy rewritten for the guest; the host's file is untouched.
+	if gitDir != "" && gitDir != common {
+		for _, f := range []string{filepath.Join(root, ".git"), filepath.Join(gitDir, "commondir")} {
+			if err := pl.translate(f); err != nil {
+				return Plan{}, err
+			}
+		}
+	}
 
 	pl.Masks = FindMasks(root, append(append([]string{}, g.Masks...), p.Mask...), append(append([]string{}, g.Unmask...), p.Unmask...))
 	return pl, nil
+}
+
+// guestPointer rewrites a git pointer file ("gitdir: C:/x/.git/worktrees/y",
+// or a commondir holding one absolute path) for the guest. ok is false when
+// nothing changes.
+func guestPointer(content string) (string, bool) {
+	line, rest, _ := strings.Cut(content, "\n")
+	line = strings.TrimRight(line, "\r")
+	prefix := ""
+	if v, found := strings.CutPrefix(line, "gitdir: "); found {
+		prefix, line = "gitdir: ", v
+	}
+	g := backend.GuestPath(line)
+	if g == line {
+		return content, false
+	}
+	return prefix + g + "\n" + rest, true
+}
+
+// translate stages a guest copy of a read-only git pointer file if the
+// guest needs different paths, and mounts the copy in its place.
+func (pl *Plan) translate(f string) error {
+	b, err := os.ReadFile(f)
+	if err != nil {
+		return nil // absent: nothing to translate
+	}
+	out, ok := guestPointer(string(b))
+	if !ok {
+		return nil
+	}
+	dir := filepath.Join(paths.Stage(), pl.Name, "guest")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	staged := filepath.Join(dir, fmt.Sprintf("%d-%s", len(pl.Files), filepath.Base(f)))
+	if err := os.WriteFile(staged, []byte(out), 0o444); err != nil {
+		// 0444 from an earlier run: replace it.
+		_ = os.Chmod(staged, 0o644)
+		if err := os.WriteFile(staged, []byte(out), 0o444); err != nil {
+			return fmt.Errorf("stage guest copy of %s: %w", f, err)
+		}
+	}
+	kept := pl.ReadOnly[:0]
+	for _, p := range pl.ReadOnly {
+		if p != f {
+			kept = append(kept, p)
+		}
+	}
+	pl.ReadOnly = kept
+	pl.Files = append(pl.Files, backend.Mount{Source: staged, Target: f, ReadOnly: true})
+	return nil
+}
+
+// gitEnv is git configuration the cage needs from its environment. Docker
+// Desktop shows Windows files to the guest as root-owned, so git's
+// ownership check (safe.directory) refuses the worktree. That check guards
+// against repositories owned by other users; inside a cage everything is
+// the agent's anyway. Bookworm's git (2.39) has no "dir/*" form, so "*"
+// covers submodule checkouts too. Unix hosts map ownership and need nothing.
+//
+// Line endings too: Git for Windows usually runs with core.autocrlf=true,
+// so the worktree holds CRLF files. Linux git without the same setting sees
+// every text file as modified (and would commit CRLF), so the cage gets the
+// host's value.
+func (pl Plan) gitEnv() []string {
+	if backend.GuestPath(pl.Root) == pl.Root {
+		return nil
+	}
+	kv := [][2]string{{"safe.directory", "*"}}
+	if pl.AutoCRLF != "" {
+		kv = append(kv, [2]string{"core.autocrlf", pl.AutoCRLF})
+	}
+	env := []string{fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(kv))}
+	for i, p := range kv {
+		env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, p[0]), fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, p[1]))
+	}
+	return env
+}
+
+// hostGitConfig is the host's effective value of a git setting for root
+// (system, global and repo config together), or "".
+func hostGitConfig(root, key string) string {
+	cmd := exec.Command("git", "-C", root, "config", "--get", key)
+	proc.Quiet(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Guarded is every host path the cage must see read-only: ReadOnly plus
+// the targets of Files (for zoo doctor).
+func (pl Plan) Guarded() []string {
+	out := append([]string{}, pl.ReadOnly...)
+	for _, f := range pl.Files {
+		out = append(out, f.Target)
+	}
+	return out
 }
 
 var skipDirs = map[string]bool{
@@ -250,12 +378,15 @@ func match(patterns []string, name string) bool {
 	return false
 }
 
+// matchRel matches patterns written with "/" (config/*.secret.json) against
+// a worktree-relative path, whatever the OS separator.
 func matchRel(patterns []string, rel string) bool {
+	rel = filepath.ToSlash(rel)
 	for _, pat := range patterns {
 		if !strings.Contains(pat, "/") {
 			continue
 		}
-		if ok, _ := filepath.Match(pat, rel); ok {
+		if ok, _ := path.Match(pat, rel); ok {
 			return true
 		}
 	}
@@ -295,12 +426,13 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 		Memory:   pl.Size.Memory,
 		Pids:     pl.Size.Pids,
 		Labels:   l,
-		Env:      append([]string{"ZOO_CAGE=" + pl.Name}, ProxyEnv(keeperIP)...),
+		Env:      append(append([]string{"ZOO_CAGE=" + pl.Name}, ProxyEnv(keeperIP)...), pl.gitEnv()...),
 		Mounts:   mounts,
 		Masks:    pl.Masks,
 		ReadOnly: pl.ReadOnly,
 		Pin:      pl.Pin,
 		ReopenRW: pl.ReopenRW,
+		Files:    pl.Files,
 	}
 }
 

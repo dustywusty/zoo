@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dusty/zoo/internal/backend"
 	"github.com/dusty/zoo/internal/config"
 )
 
@@ -32,7 +33,7 @@ func TestFindMasks(t *testing.T) {
 	rel := []string{}
 	for _, p := range got {
 		r, _ := filepath.Rel(root, p)
-		rel = append(rel, r)
+		rel = append(rel, filepath.ToSlash(r))
 	}
 	joined := strings.Join(rel, ",")
 	for _, want := range []string{".env", ".env.local", "apps/api/.env", "certs/server.key"} {
@@ -49,6 +50,7 @@ func TestPlanWorktree(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("no git")
 	}
+	t.Setenv("ZOO_HOME", t.TempDir()) // guest copies are staged under it
 	base := t.TempDir()
 	main := filepath.Join(base, "repo")
 	wt := filepath.Join(base, "repo-feature")
@@ -89,9 +91,33 @@ func TestPlanWorktree(t *testing.T) {
 	}
 	common := pl.ExtraRW[0]
 	gitDir := filepath.Join(common, "worktrees", filepath.Base(wt))
+	guarded := strings.Join(pl.Guarded(), ",")
 	for _, want := range []string{filepath.Join(root, ".git"), filepath.Join(gitDir, "commondir")} {
-		if !strings.Contains(ro, want) {
-			t.Errorf("linked worktree pointer %s must be read-only: %v", want, pl.ReadOnly)
+		if !strings.Contains(guarded, want) {
+			t.Errorf("linked worktree pointer %s must be read-only: %v", want, pl.Guarded())
+		}
+	}
+	// Where the guest spells paths differently (Windows), the cage sees a
+	// rewritten read-only copy of the .git pointer instead of the host file.
+	dotgit := filepath.Join(root, ".git")
+	host, _ := os.ReadFile(dotgit)
+	_, needs := guestPointer(string(host))
+	var staged *backend.Mount
+	for i := range pl.Files {
+		if pl.Files[i].Target == dotgit {
+			staged = &pl.Files[i]
+		}
+	}
+	switch {
+	case needs && staged == nil:
+		t.Errorf(".git holds a host-only path (%q) but no guest copy is mounted: %+v", host, pl.Files)
+	case !needs && staged != nil:
+		t.Errorf("guest copy of .git staged though paths match: %+v", staged)
+	case staged != nil:
+		b, _ := os.ReadFile(staged.Source)
+		want := "gitdir: " + backend.GuestPath(gitDir)
+		if !strings.HasPrefix(string(b), want) || !staged.ReadOnly || strings.Contains(ro, dotgit) {
+			t.Errorf("guest .git = %q (ro=%v), want %q, mounted only once", b, staged.ReadOnly, want)
 		}
 	}
 	// Every other worktree's gitdir and every submodule's git dir is
@@ -129,6 +155,15 @@ func TestPlanWorktree(t *testing.T) {
 	spec := pl.Spec(g, "192.168.64.2", map[string]string{"zoo.backend": "fake"})
 	if spec.CPUs != 4 || spec.Memory != "4G" || spec.Pids != 2048 || spec.Labels["zoo.backend"] != "fake" || spec.Labels[LabelWorktree] != root {
 		t.Errorf("spec: %+v", spec)
+	}
+	// Where the guest sees host files as another owner (Windows), git in the
+	// cage is told to trust the worktree; on Unix it needs nothing.
+	env := strings.Join(spec.Env, " ")
+	if trusts := strings.Contains(env, "GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=*"); trusts != (backend.GuestPath(root) != root) {
+		t.Errorf("safe.directory in env = %v for root %s: %v", trusts, root, spec.Env)
+	}
+	if pl.AutoCRLF != "" && !strings.Contains(env, "GIT_CONFIG_KEY_1=core.autocrlf GIT_CONFIG_VALUE_1="+pl.AutoCRLF) {
+		t.Errorf("host core.autocrlf=%s not mirrored: %v", pl.AutoCRLF, spec.Env)
 	}
 	if len(spec.Mounts) != 2 || spec.Mounts[0].Source != root || spec.Mounts[0].Target != root || spec.Mounts[0].ReadOnly {
 		t.Errorf("mounts: %+v", spec.Mounts)
@@ -168,6 +203,24 @@ func TestPlanMainCheckoutPinsGitDir(t *testing.T) {
 		}
 		if !strings.Contains(","+strings.Join(pl.ReadOnly, ",")+",", ","+p+",") {
 			t.Errorf(".git/%s must be read-only: %v", d, pl.ReadOnly)
+		}
+	}
+}
+
+func TestGuestPointer(t *testing.T) {
+	for in, want := range map[string]string{
+		"gitdir: C:/Users/me/repo/.git/worktrees/wt\n":   "gitdir: /c/Users/me/repo/.git/worktrees/wt\n",
+		"gitdir: C:/Users/me/repo/.git/worktrees/wt\r\n": "gitdir: /c/Users/me/repo/.git/worktrees/wt\n",
+		`D:\src\repo\.git` + "\n":                        "/d/src/repo/.git\n",
+	} {
+		got, ok := guestPointer(in)
+		if !ok || got != want {
+			t.Errorf("guestPointer(%q) = %q, %v; want %q", in, got, ok, want)
+		}
+	}
+	for _, same := range []string{"gitdir: /home/me/repo/.git/worktrees/wt\n", "../..\n", "gitdir: ../.git/modules/x\n"} {
+		if got, ok := guestPointer(same); ok || got != same {
+			t.Errorf("guestPointer(%q) changed it to %q", same, got)
 		}
 	}
 }

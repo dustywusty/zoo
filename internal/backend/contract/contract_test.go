@@ -781,6 +781,9 @@ func TestContract(t *testing.T) {
 			t.Setenv("ZOO_FAKE_DIALECT", "")
 			t.Setenv("ZOO_CONTAINER_BIN", "")
 			t.Setenv("ZOO_DOCKER_BIN", "")
+			// The fakes are CLIs; keep the docker backend off the engine API.
+			t.Setenv("ZOO_DOCKER_API", "off")
+			t.Setenv("DOCKER_HOST", "")
 
 			// The mask file lives alone in its own directory (apple shares a
 			// file mount's parent directory with the VM).

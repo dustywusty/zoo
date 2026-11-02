@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/dusty/zoo/internal/proc"
 )
 
 // Secret source prefixes.
@@ -372,6 +374,7 @@ func runCLI(bin string, args ...string) (string, error) {
 	var out, errb bytes.Buffer
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdin = nil
+	proc.Quiet(cmd)
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	cmd.Env = os.Environ()
 	cmd.WaitDelay = time.Second

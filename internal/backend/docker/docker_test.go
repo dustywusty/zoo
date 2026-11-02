@@ -79,14 +79,15 @@ func TestRunArgs(t *testing.T) {
 		ReadOnly: []string{filepath.Join(git, "hooks"), filepath.Join(git, "config"), filepath.Join(git, "nope")},
 		Pin:      []string{git},
 	}), " ")
+	g := backend.GuestPath
 	for _, want := range []string{
 		"--network zoo-cages", "--dns 127.0.0.1", "--cpus 2", "--memory 2G", "--pids-limit 1024",
 		"--cap-drop ALL", "--security-opt no-new-privileges", "--runtime runsc", "--label zoo.cage=repo-1",
 		"--env ZOO_GUARD=host",
-		"--mount type=bind,source=" + root + ",target=" + root + " ",
-		"--mount type=bind,source=" + git + ",target=" + git + " ",
-		"--mount type=bind,source=" + filepath.Join(git, "config") + ",target=" + filepath.Join(git, "config") + ",readonly",
-		"--mount type=bind,source=/m/empty,target=" + filepath.Join(root, ".env") + ",readonly",
+		"--mount type=bind,source=" + root + ",target=" + g(root) + " ",
+		"--mount type=bind,source=" + git + ",target=" + g(git) + " ",
+		"--mount type=bind,source=" + filepath.Join(git, "config") + ",target=" + g(filepath.Join(git, "config")) + ",readonly",
+		"--mount type=bind,source=/m/empty,target=" + g(filepath.Join(root, ".env")) + ",readonly",
 	} {
 		if !strings.Contains(got+" ", want) {
 			t.Errorf("missing %q in\n%s", want, got)

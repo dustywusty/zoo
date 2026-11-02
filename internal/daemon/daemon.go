@@ -17,7 +17,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/dusty/zoo/internal/backend"
@@ -25,6 +24,7 @@ import (
 	"github.com/dusty/zoo/internal/config"
 	"github.com/dusty/zoo/internal/keeper"
 	"github.com/dusty/zoo/internal/paths"
+	"github.com/dusty/zoo/internal/proc"
 )
 
 //go:embed web/index.html
@@ -134,7 +134,7 @@ func (s *Server) Run(ctx context.Context) error {
 	for _, e := range keeper.ReadTail(1000, start) {
 		s.ingest(e, false)
 	}
-	go s.loop(ctx, 2*time.Second, s.pollCages)
+	go s.watchCages(ctx)
 	go s.loop(ctx, 2*time.Second, s.pollStats)
 	go s.loop(ctx, 5*time.Second, s.refreshAllowlist)
 	go s.loop(ctx, 2*time.Second, s.broadcastState)
@@ -156,6 +156,68 @@ func (s *Server) Run(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+// watchCages keeps the cage list current. Backends that report changes
+// (backend.Watcher: docker through its API) are refreshed when something
+// happens, plus a slow safety poll; others are polled every 2 s. Before
+// D25 docker was polled too, which meant several docker processes every
+// 2 s: enough to freeze a Windows desktop.
+func (s *Server) watchCages(ctx context.Context) {
+	s.pollCages()
+	w, ok := s.backend.(backend.Watcher)
+	if !ok {
+		s.loop(ctx, 2*time.Second, s.pollCages)
+		return
+	}
+	safety := time.NewTicker(30 * time.Second)
+	defer safety.Stop()
+	for ctx.Err() == nil {
+		changes, err := w.Watch(ctx)
+		if err != nil {
+			// No event stream (API unreachable): poll until it's back.
+			log.Printf("cage events: %v; polling", err)
+			t := time.NewTimer(30 * time.Second)
+			for done := false; !done; {
+				select {
+				case <-ctx.Done():
+					t.Stop()
+					return
+				case <-t.C:
+					done = true
+				case <-time.After(2 * time.Second):
+					s.pollCages()
+				}
+			}
+			continue
+		}
+		s.pollCages() // catch up on anything missed while (re)connecting
+		for open := true; open; {
+			select {
+			case <-ctx.Done():
+				return
+			case _, open = <-changes:
+				if open {
+					// Let a burst (create, connect, start) settle first.
+					time.Sleep(250 * time.Millisecond)
+					drain(changes)
+					s.pollCages()
+				}
+			case <-safety.C:
+				s.pollCages()
+			}
+		}
+	}
+}
+
+func drain(c <-chan struct{}) {
+	for {
+		select {
+		case <-c:
+		default:
+			return
+		}
+	}
 }
 
 func (s *Server) loop(ctx context.Context, every time.Duration, fn func()) {
@@ -198,13 +260,7 @@ func (s *Server) pollCages() {
 	}
 }
 
-func alive(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return p.Signal(syscall.Signal(0)) == nil
-}
+func alive(pid int) bool { return proc.Alive(pid) }
 
 func (s *Server) pollStats() {
 	samples, err := s.backend.Sample(context.Background())
