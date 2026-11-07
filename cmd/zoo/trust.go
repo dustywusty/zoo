@@ -80,7 +80,11 @@ func ensureTrust(root string) {
 		return
 	}
 	if !isTerminal(os.Stdin) || !isTerminal(os.Stderr) {
-		say("WARNING: %s changed since you approved it (an agent can write it). Using the approved copy; review and apply with `zoo trust %s`", config.ProjectFile(root), root)
+		what := "changed since you approved it"
+		if !st.EverTrust {
+			what = "isn't approved yet"
+		}
+		say("WARNING: %s %s (agents can write it). Using the approved copy, if any; review and apply with `zoo trust %s`", config.ProjectFile(root), what, root)
 		return
 	}
 	what := "changed since you approved it"

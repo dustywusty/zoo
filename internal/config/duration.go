@@ -24,11 +24,11 @@ func ParseFor(s string) (time.Duration, error) {
 	return d, nil
 }
 
-// Until formats an expiry for humans: "in 3h12m (14:05)".
+// Until formats an expiry for humans: "3h12m (until Jan 2 14:05)".
 func Until(t time.Time) string {
 	d := time.Until(t).Round(time.Minute)
 	if d <= 0 {
 		return "expired"
 	}
-	return fmt.Sprintf("in %s (%s)", strings.TrimSuffix(d.String(), "0s"), t.Local().Format("Jan 2 15:04"))
+	return fmt.Sprintf("%s (until %s)", strings.TrimSuffix(d.String(), "0s"), t.Local().Format("Jan 2 15:04"))
 }

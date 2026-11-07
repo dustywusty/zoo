@@ -548,6 +548,16 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 		}
 	}
 	if !exists || (!st.Running && cage.Stale(st, spec)) {
+		if exists {
+			// Delete it first: deleting a cage also drops its own network,
+			// which CageNetwork is about to (re)create.
+			if why := cage.Changed(st, spec); why == "layout" {
+				say("recreating %s: its mounts or git settings changed", pl.Name)
+			}
+			if err := e.b.Delete(ctx, pl.ID); err != nil {
+				return pl, ip, err
+			}
+		}
 		// A new cage gets its own network where the backend supports it.
 		network, kip, err := e.b.CageNetwork(ctx, pl.ID)
 		if err != nil {
@@ -1069,7 +1079,7 @@ func cmdAllow(args []string) error {
 			say("already allowed for good")
 			return nil
 		}
-		say("allowed %s until %s", strings.Join(touched, " "), config.Until(until))
+		say("allowed %s for %s", strings.Join(touched, " "), config.Until(until))
 		return nil
 	}
 	added, err := keeper.Allow(args...)
@@ -1129,7 +1139,7 @@ func cmdAllowlist() error {
 		sort.Strings(hosts)
 		fmt.Println("\n# temporary:")
 		for _, h := range hosts {
-			fmt.Printf("#   %s expires %s\n", h, config.Until(exp[h]))
+			fmt.Printf("#   %s: %s left\n", h, config.Until(exp[h]))
 		}
 	}
 	return nil

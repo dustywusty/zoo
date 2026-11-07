@@ -129,12 +129,12 @@ func cmdGrant(verb string, args []string) error {
 	if verb == "grant" && isCred {
 		say("%s holds %s for %s (new sessions get the placeholder; the keeper keeps the value)", c.Name, args[1], strings.Join(cred.Hosts, ", "))
 		if !until.IsZero() {
-			say("until %s; then it's revoked", config.Until(until))
+			say("for %s; then it's revoked", config.Until(until))
 		}
 	} else if verb == "grant" {
 		say("%s can reach %s as %s:%d", c.Name, args[1], services.HostName(args[1]), services.ListenPort(g.Services[args[1]]))
 		if !until.IsZero() {
-			say("until %s; then it's revoked", config.Until(until))
+			say("for %s; then it's revoked", config.Until(until))
 		}
 	} else {
 		say("revoked %s from %s", args[1], c.Name)
