@@ -508,8 +508,13 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 	}
 	spec := pl.Spec(e.g, ip, labels)
 	st, exists, _ := e.b.Get(ctx, pl.ID)
-	if exists && st.Running && cage.Stale(st, spec) {
-		say("WARNING: %s was created by an older zoo; its secret masks and git guard may not hold. Stop the agents in it, then `zoo reset %s`", pl.Name, pl.Name)
+	if exists && st.Running {
+		switch cage.Changed(st, spec) {
+		case "image":
+			say("WARNING: %s was created by an older zoo; its secret masks and git guard may not hold. Stop the agents in it, then `zoo reset %s`", pl.Name, pl.Name)
+		case "layout":
+			say("note: %s's mounts or git settings changed (zoo.yaml or git config); they apply after `zoo reset %s`", pl.Name, pl.Name)
+		}
 	}
 	if !exists || (!st.Running && cage.Stale(st, spec)) {
 		// A new cage gets its own network where the backend supports it.
@@ -530,10 +535,15 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 	}
 	if created {
 		say("cage %s up on %s (%s: %d CPU, %s, %s isolation) for %s", pl.Name, e.b.Name(), pl.SizeName, pl.Size.CPUs, pl.Size.Memory, e.info.Caps.Isolation, pl.Root)
+		for _, m := range pl.Extra {
+			say("  also mounted: %s", m)
+		}
 		if len(pl.Masks) > 0 {
 			say("hiding %d secret file(s) inside the cage", len(pl.Masks))
 		}
-		warnGitRisks(pl.Root)
+		for _, r := range pl.Roots() {
+			warnGitRisks(r)
+		}
 	}
 	syncKeeper(ctx, e)
 	if err := applyServices(ctx, e, pl.Name, pl.ID, ip); err != nil {
@@ -700,7 +710,9 @@ func runIn(o runOpts, cageName string) error {
 	// Remove the env file once the CLI has read it.
 	go func() { time.Sleep(3 * time.Second); cleanup() }()
 	code, err := e.b.Exec(ctx, spec)
-	warnGitTraps(pl.Root)
+	for _, r := range pl.Roots() {
+		warnGitTraps(r)
+	}
 	if err != nil {
 		return err
 	}
@@ -1324,17 +1336,23 @@ func cmdDoctor(args []string) error {
 	if g.Port > 0 {
 		fmt.Println(paint("32", "  ✓ ") + fmt.Sprintf("dashboard: bound to 127.0.0.1:%d only", g.Port))
 	}
-	if traps, complete := cage.GitTraps(pl.Root); len(traps) > 0 {
-		fails++
-		for _, t := range traps {
-			fmt.Println(paint("31", "  ✗ ") + fmt.Sprintf("git-traps: %s (%s); delete it before running git there", t.Path, t.Reason))
+	for _, root := range pl.Roots() {
+		if traps, complete := cage.GitTraps(root); len(traps) > 0 {
+			fails++
+			for _, t := range traps {
+				fmt.Println(paint("31", "  ✗ ") + fmt.Sprintf("git-traps: %s (%s); delete it before running git there", t.Path, t.Reason))
+			}
+		} else if !complete {
+			fmt.Println(paint("33", "  ! ") + "git-traps: scan stopped early in " + root + " (too many files)")
+		} else {
+			fmt.Println(paint("32", "  ✓ ") + "git-traps: no planted repositories in " + root)
 		}
-	} else if !complete {
-		fmt.Println(paint("33", "  ! ") + "git-traps: scan stopped early (too many files)")
-	} else {
-		fmt.Println(paint("32", "  ✓ ") + "git-traps: no planted repositories in the worktree")
 	}
-	if risks := cage.HostGitRisks(pl.Root); len(risks) > 0 {
+	var risks []cage.GitRisk
+	for _, root := range pl.Roots() {
+		risks = append(risks, cage.HostGitRisks(root)...)
+	}
+	if len(risks) > 0 {
 		for _, r := range risks {
 			msg := fmt.Sprintf("git-runs: %s (%s)", r.Path, r.Reason)
 			if r.Writable != "" {

@@ -131,3 +131,45 @@ func contains(xs []string, x string) bool {
 	}
 	return false
 }
+
+func TestExtraMounts(t *testing.T) {
+	t.Setenv("ZOO_HOME", t.TempDir())
+	root := gitInit(t)
+	other := gitInit(t)
+	write(t, filepath.Join(other, ".env"), "SECRET=1")
+	g := config.Defaults()
+	pl, err := NewPlan(root, g, config.Project{Mounts: []string{other}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pl.Extra) != 1 || pl.Extra[0] != other {
+		t.Fatalf("extra = %v", pl.Extra)
+	}
+	if !contains(pl.Masks, filepath.Join(other, ".env")) {
+		t.Errorf("secret in a mounted repo not masked: %v", pl.Masks)
+	}
+	if !contains(pl.ReadOnly, filepath.Join(other, ".git/hooks")) {
+		t.Errorf("mounted repo's hooks not read-only: %v", pl.ReadOnly)
+	}
+	spec := pl.Spec(g, "10.0.0.2", nil)
+	if spec.Labels[LabelMounts] == "" || spec.Labels[LabelLayout] == "" {
+		t.Fatalf("labels: %v", spec.Labels)
+	}
+	// Adding a mount changes the layout; the same plan doesn't.
+	again := pl.Spec(g, "10.0.0.2", nil)
+	if Layout(again) != Layout(spec) {
+		t.Fatal("layout isn't stable")
+	}
+	plain, _ := NewPlan(root, g, config.Project{}, "")
+	if plain.Spec(g, "10.0.0.2", nil).Labels[LabelLayout] == spec.Labels[LabelLayout] {
+		t.Fatal("layout ignores mounts")
+	}
+
+	home, _ := os.UserHomeDir()
+	for _, bad := range []string{"/", home, filepath.Dir(root), filepath.Join(root, "sub"), "~/.ssh"} {
+		_ = os.MkdirAll(filepath.Join(root, "sub"), 0o755)
+		if _, err := ResolveMounts(root, []string{bad}); err == nil {
+			t.Errorf("mount %q accepted", bad)
+		}
+	}
+}

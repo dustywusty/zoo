@@ -386,7 +386,11 @@ func (s *Server) scanGitTraps() {
 		if !c.Running || c.Worktree == "" {
 			continue
 		}
-		traps, _ := cage.GitTraps(c.Worktree)
+		var traps []cage.Trap
+		for _, root := range c.Roots() {
+			t, _ := cage.GitTraps(root)
+			traps = append(traps, t...)
+		}
 		var alerts []Alert
 		s.mu.Lock()
 		for _, t := range traps {

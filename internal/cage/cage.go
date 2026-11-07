@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -34,6 +35,8 @@ const (
 	LabelIso      = "zoo.isolation"
 	LabelWeaker   = "zoo.weaker-isolation" // set when started below the isolation floor
 	LabelImage    = "zoo.image"            // image the cage was created from
+	LabelMounts   = "zoo.mounts"           // JSON list of further worktrees mounted (zoo.yaml mounts:)
+	LabelLayout   = "zoo.layout"           // hash of mounts and guards; a change needs a new cage
 )
 
 // Plan is everything needed to create a cage for one worktree.
@@ -41,6 +44,7 @@ type Plan struct {
 	Name     string   // short name, e.g. api-3fa2c1
 	ID       string   // container id, e.g. zoo-api-3fa2c1
 	Root     string   // worktree root on the host (and in the guest)
+	Extra    []string // further worktrees mounted rw at the same path (zoo.yaml mounts:)
 	ExtraRW  []string // other host paths mounted rw (a worktree's main .git)
 	Masks    []string // secret files hidden inside the cage
 	ReadOnly []string // paths made read-only inside the cage
@@ -53,6 +57,9 @@ type Plan struct {
 	SizeName    string
 	Size        config.Size
 }
+
+// Roots is every worktree in the plan: the main one, then zoo.yaml mounts.
+func (pl Plan) Roots() []string { return append([]string{pl.Root}, pl.Extra...) }
 
 // Root returns the git toplevel for dir, or dir itself outside a repo.
 func Root(dir string) (string, error) {
@@ -255,19 +262,33 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 	}
 	pl.Git = mode
 	pl.guardGit(root, mode)
+	extra, err := ResolveMounts(root, p.Mounts)
+	if err != nil {
+		return Plan{}, err
+	}
+	for _, m := range extra {
+		pl.Extra = append(pl.Extra, m)
+		if top, err := Root(m); err == nil && top == m {
+			pl.guardGit(m, mode)
+		}
+	}
 	// A directory already mounted (read-only or reopened) can't be renamed
 	// either, and mounting it again rw as a pin would undo the read-only one.
 	mounted := map[string]bool{}
 	for _, p := range append(append([]string{}, pl.ReadOnly...), pl.ReopenRW...) {
 		mounted[p] = true
 	}
-	for _, d := range pinsFor(pl.ReadOnly, append([]string{root}, pl.ExtraRW...)) {
+	for _, d := range pinsFor(pl.ReadOnly, append(append([]string{root}, pl.Extra...), pl.ExtraRW...)) {
 		if !mounted[d] {
 			pl.Pin = append(pl.Pin, d)
 		}
 	}
 
-	pl.Masks = append(pl.Masks, FindMasks(root, append(append([]string{}, g.Masks...), p.Mask...), append(append([]string{}, g.Unmask...), p.Unmask...))...)
+	masks := append(append([]string{}, g.Masks...), p.Mask...)
+	unmask := append(append([]string{}, g.Unmask...), p.Unmask...)
+	for _, r := range append([]string{root}, pl.Extra...) {
+		pl.Masks = append(pl.Masks, FindMasks(r, masks, unmask)...)
+	}
 	return pl, nil
 }
 
@@ -349,15 +370,22 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 		LabelMemory:   pl.Size.Memory,
 		LabelImage:    g.CageImage,
 	}
+	if len(pl.Extra) > 0 {
+		b, _ := json.Marshal(pl.Extra)
+		l[LabelMounts] = string(b)
+	}
 	for k, v := range labels {
 		l[k] = v
 	}
 	mounts := []backend.Mount{{Source: pl.Root, Target: pl.Root}}
+	for _, p := range pl.Extra {
+		mounts = append(mounts, backend.Mount{Source: p, Target: p})
+	}
 	for _, p := range pl.ExtraRW {
 		mounts = append(mounts, backend.Mount{Source: p, Target: p})
 	}
 	mounts = append(mounts, pl.ExtraMounts...)
-	return backend.CageSpec{
+	spec := backend.CageSpec{
 		ID:       pl.ID,
 		Image:    g.CageImage,
 		CPUs:     pl.Size.CPUs,
@@ -371,12 +399,41 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 		Pin:      pl.Pin,
 		ReopenRW: pl.ReopenRW,
 	}
+	spec.Labels[LabelLayout] = Layout(spec)
+	return spec
+}
+
+// Layout fingerprints what a cage can't change while it exists: its mounts
+// and guards. Masks are left out (they're fixed at creation by design).
+func Layout(spec backend.CageSpec) string {
+	h := sha1.New()
+	for _, m := range spec.Mounts {
+		fmt.Fprintf(h, "m %s %s %v\n", m.Source, m.Target, m.ReadOnly)
+	}
+	for _, list := range [][]string{spec.ReadOnly, spec.Pin, spec.ReopenRW} {
+		for _, p := range list {
+			fmt.Fprintf(h, "p %s\n", p)
+		}
+		fmt.Fprintln(h, "--")
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
+}
+
+// Changed reports why an existing cage no longer matches the spec, or "".
+func Changed(st backend.Status, spec backend.CageSpec) string {
+	switch {
+	case st.Labels[LabelImage] != spec.Image:
+		return "image"
+	case st.Labels[LabelLayout] != "" && st.Labels[LabelLayout] != spec.Labels[LabelLayout]:
+		return "layout"
+	}
+	return ""
 }
 
 // Stale reports whether an existing cage predates the current image (and so
 // may lack the mounts this zoo relies on, e.g. v0 cages' guard).
 func Stale(st backend.Status, spec backend.CageSpec) bool {
-	return st.Labels[LabelImage] != spec.Image
+	return Changed(st, spec) != ""
 }
 
 // Ensure creates or starts the cage. Returns true if it was (re)created.
@@ -420,18 +477,27 @@ func waitRunning(ctx context.Context, b backend.Backend, id string) error {
 
 // Info is a cage as listed for humans and the dashboard.
 type Info struct {
-	Name      string `json:"name"`
-	ID        string `json:"id"`
-	Worktree  string `json:"worktree"`
-	Size      string `json:"size"`
-	CPUs      string `json:"cpus"`
-	Memory    string `json:"memory"`
-	Status    string `json:"status"`
-	Running   bool   `json:"running"`
-	IP        string `json:"ip"`
-	Isolation string `json:"isolation"`
-	Weaker    bool   `json:"weaker_isolation"` // started below the isolation floor
-	Network   string `json:"network"`
+	Name      string   `json:"name"`
+	ID        string   `json:"id"`
+	Worktree  string   `json:"worktree"`
+	Size      string   `json:"size"`
+	CPUs      string   `json:"cpus"`
+	Memory    string   `json:"memory"`
+	Status    string   `json:"status"`
+	Running   bool     `json:"running"`
+	IP        string   `json:"ip"`
+	Isolation string   `json:"isolation"`
+	Weaker    bool     `json:"weaker_isolation"` // started below the isolation floor
+	Network   string   `json:"network"`
+	Mounts    []string `json:"mounts,omitempty"` // further worktrees (zoo.yaml mounts:)
+}
+
+// Roots is every worktree mounted in the cage: the main one, then the rest.
+func (c Info) Roots() []string {
+	if c.Worktree == "" {
+		return c.Mounts
+	}
+	return append([]string{c.Worktree}, c.Mounts...)
 }
 
 // List returns all zoo cages.
@@ -458,8 +524,13 @@ func List(ctx context.Context, b backend.Backend) ([]Info, error) {
 			}
 			name = strings.TrimPrefix(c.ID, Prefix)
 		}
+		var extra []string
+		if m := c.Labels[LabelMounts]; m != "" {
+			_ = json.Unmarshal([]byte(m), &extra)
+		}
 		out = append(out, Info{
-			Name: name, ID: c.ID, Worktree: c.Labels[LabelWorktree],
+			Mounts: extra,
+			Name:   name, ID: c.ID, Worktree: c.Labels[LabelWorktree],
 			Size: c.Labels[LabelSize], CPUs: c.Labels[LabelCPUs], Memory: c.Labels[LabelMemory],
 			Status: c.State, Running: c.Running, IP: c.IP,
 			Isolation: c.Labels[LabelIso], Weaker: c.Labels[LabelWeaker] == "1",

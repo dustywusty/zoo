@@ -87,6 +87,7 @@ type Project struct {
 	Unmask   []string `yaml:"unmask"`
 	Services []string `yaml:"services"` // services granted to this repo's cage
 	Git      string   `yaml:"git"`      // rw (default) | ro | none
+	Mounts   []string `yaml:"mounts"`   // further worktrees in the same cage (relative to this one, or ~/...)
 }
 
 func Defaults() Global {
