@@ -29,6 +29,30 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
 
+  # The daemon's engine API path (D25) against real engines: detect, list,
+  # inspect, streamed stats (CPU must read ~a core for a busy container) and
+  # a stop event. Podman through its Docker-compatible service (D30).
+  engine-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - run: go test -c -o docker.test ./internal/backend/docker
+      - name: docker
+        run: |
+          docker run -d --name zoo-enginetest alpine sh -c 'while :; do :; done'
+          ZOO_TEST_ENGINE=docker ZOO_TEST_ENGINE_HOST=unix:///var/run/docker.sock ZOO_TEST_ENGINE_CAGE=zoo-enginetest \
+            ZOO_TEST_BUSY=1 ZOO_TEST_ENGINE_STOP="docker stop -t 1 zoo-enginetest" ./docker.test -test.run TestRealEngineBackend -test.v
+      - name: podman
+        run: |
+          podman --version
+          sudo podman run -d --name zoo-enginetest docker.io/library/alpine sh -c 'while :; do :; done'
+          sudo sh -c 'podman system service --time=0 unix:///tmp/podman.sock > /tmp/podman-svc.log 2>&1 &'
+          for i in $(seq 1 50); do [ -S /tmp/podman.sock ] && break; sleep 0.2; done
+          sudo ZOO_TEST_ENGINE_HOST=unix:///tmp/podman.sock ZOO_TEST_ENGINE_CAGE=zoo-enginetest \
+            ZOO_TEST_BUSY=1 ZOO_TEST_ENGINE_STOP="podman stop -t 1 zoo-enginetest" ./docker.test -test.run TestRealEngineBackend -test.v
+
   # M1 gate: docker backend, escape suite inside a real cage.
   docker-escape-suite:
     runs-on: ubuntu-latest
