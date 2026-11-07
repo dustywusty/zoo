@@ -50,6 +50,8 @@ Usage:
                                  run an agent (default: claude) in this worktree's cage
       --size S                   tiny | small | medium | large | cpus:memory (e.g. 3:6G)
   zoo shell [cage]               bash in a cage (default: this worktree's)
+  zoo ssh setup                  write ~/.zoo/ssh/config (Host zoo-<cage>) for editors; prints the Include line
+  zoo ssh [cage] [cmd...]        ssh into a cage as the agent (no listener: runs over the backend's exec)
   zoo ls                         list cages
   zoo stop <cage|all>            stop a cage (the worktree is untouched)
   zoo reset <cage>               delete a cage; next run starts from a clean image
@@ -105,6 +107,10 @@ func main() {
 		err = cmdRun(args)
 	case "shell":
 		err = cmdShell(args)
+	case "ssh":
+		err = cmdSSH(args)
+	case "ssh-proxy":
+		err = cmdSSHProxy(args)
 	case "ls", "list":
 		err = cmdLs()
 	case "stop":
