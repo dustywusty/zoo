@@ -51,6 +51,9 @@ type Global struct {
 
 	// Services are things cages may be granted besides web hosts.
 	Services map[string]Service `yaml:"services"`
+
+	// Git is the default for what cages may do with .git: rw | ro | none.
+	Git string `yaml:"git"`
 }
 
 // Service is a host port, a sidecar, a remote TCP destination or an SSH
@@ -83,6 +86,7 @@ type Project struct {
 	Mask     []string `yaml:"mask"`
 	Unmask   []string `yaml:"unmask"`
 	Services []string `yaml:"services"` // services granted to this repo's cage
+	Git      string   `yaml:"git"`      // rw (default) | ro | none
 }
 
 func Defaults() Global {
@@ -171,6 +175,9 @@ func merge(g *Global, f Global) {
 	if f.IsolationFloor != "" {
 		g.IsolationFloor = f.IsolationFloor
 	}
+	if f.Git != "" {
+		g.Git = f.Git
+	}
 	if f.Docker.Bin != "" {
 		g.Docker.Bin = f.Docker.Bin
 	}
@@ -235,6 +242,8 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 #   large:  { cpus: 6, memory: 8G, pids: 4096 }
 # masks: [".env", ".env.*", "*.pem", "*.key", "*.p12", "id_rsa*", "id_ed25519*", ".npmrc", ".pypirc", ".netrc"]
 # unmask: [".env.example", ".env.sample", ".env.template", "*.pub"]
+# git: rw                   # what cages may do with .git: rw (commit; hooks/config read-only),
+#                            # ro (read history only) or none (no .git). zoo.yaml can set it per repo
 # bytes_out_alert: 5242880   # alert when one cage sends this much to one host
 # ntfy_url: https://ntfy.sh/your-private-topic
 # services:                  # things cages can be granted (zoo grant <cage> <service>)

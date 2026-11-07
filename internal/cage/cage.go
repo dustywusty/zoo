@@ -18,6 +18,7 @@ import (
 	"github.com/dusty/zoo/internal/backend"
 	"github.com/dusty/zoo/internal/config"
 	"github.com/dusty/zoo/internal/keeper"
+	"github.com/dusty/zoo/internal/paths"
 )
 
 const Prefix = "zoo-"
@@ -45,8 +46,12 @@ type Plan struct {
 	ReadOnly []string // paths made read-only inside the cage
 	Pin      []string // directories mounted onto themselves so they can't be renamed
 	ReopenRW []string // dirs inside a read-only dir made writable again (this worktree's gitdir)
-	SizeName string
-	Size     config.Size
+	// ExtraMounts are further mounts: a git dir outside the worktree shown
+	// read-only (git: ro), or an empty directory over one (git: none).
+	ExtraMounts []backend.Mount
+	Git         string // rw | ro | none
+	SizeName    string
+	Size        config.Size
 }
 
 // Root returns the git toplevel for dir, or dir itself outside a repo.
@@ -131,6 +136,106 @@ func within(path, dir string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
 }
 
+// Git modes: what a cage can do with the repository's .git.
+const (
+	GitRW   = "rw"   // commit, branch, rebase (default); hooks and config stay read-only
+	GitRO   = "ro"   // read history, can't change anything in .git
+	GitNone = "none" // no .git in the cage at all
+)
+
+// GitMode resolves zoo.yaml's git: over the global default.
+func GitMode(g config.Global, p config.Project) (string, error) {
+	m := strings.ToLower(strings.TrimSpace(p.Git))
+	if m == "" {
+		m = strings.ToLower(strings.TrimSpace(g.Git))
+	}
+	switch m {
+	case "", GitRW:
+		return GitRW, nil
+	case GitRO, GitNone:
+		return m, nil
+	}
+	return "", fmt.Errorf("git: %q isn't a mode (rw, ro, none)", m)
+}
+
+// guardGit adds the mounts that keep one repository's .git from running
+// anything on the host. root is a worktree mounted rw in the cage.
+func (pl *Plan) guardGit(root, mode string) {
+	common, gitDir := gitPaths(root)
+	if common == "" {
+		return
+	}
+	outside := !within(common, root)
+	switch mode {
+	case GitNone:
+		// An empty read-only directory over the git dir; a linked
+		// worktree's .git file reads as empty. A git dir outside the
+		// worktree isn't mounted at all.
+		if !outside {
+			pl.ExtraMounts = append(pl.ExtraMounts, backend.Mount{Source: paths.EmptyDir(), Target: common, ReadOnly: true})
+		}
+		if gitDir != common {
+			pl.Masks = append(pl.Masks, filepath.Join(root, ".git"))
+		}
+		return
+	case GitRO:
+		if outside {
+			pl.ExtraMounts = append(pl.ExtraMounts, backend.Mount{Source: common, Target: common, ReadOnly: true})
+		} else {
+			pl.ReadOnly = append(pl.ReadOnly, common)
+		}
+		if gitDir != common {
+			pl.ReadOnly = append(pl.ReadOnly, filepath.Join(root, ".git"))
+		}
+		pl.ReadOnly = append(pl.ReadOnly, WritableGitPaths(root)...)
+		return
+	}
+	if outside {
+		pl.ExtraRW = append(pl.ExtraRW, common)
+	}
+	// Everything under the common dir that decides what the host's git
+	// runs, for this worktree or any other:
+	//   hooks/, config      this repo
+	//   worktrees/          every linked worktree's commondir and
+	//                       config.worktree: rewriting another worktree's
+	//                       commondir points the host's git at a config
+	//                       the agent wrote
+	//   modules/            submodules' own config and hooks
+	// Make sure the dirs exist so the agent can't create them.
+	for _, d := range []string{"hooks", "worktrees", "modules"} {
+		_ = os.MkdirAll(filepath.Join(common, d), 0o755)
+	}
+	pl.ReadOnly = append(pl.ReadOnly,
+		filepath.Join(common, "hooks"), filepath.Join(common, "config"),
+		filepath.Join(common, "worktrees"), filepath.Join(common, "modules"))
+	if gitDir != "" && gitDir != common {
+		// A linked worktree: its own gitdir (HEAD, index) lives under
+		// worktrees/ and must stay writable, but its .git file and gitdir
+		// pointers decide which config the host's git reads.
+		if within(gitDir, filepath.Join(common, "worktrees")) {
+			pl.ReopenRW = append(pl.ReopenRW, gitDir)
+		}
+		// A linked worktree keeps its submodules' git dirs in its own
+		// gitdir, not the common one.
+		_ = os.MkdirAll(filepath.Join(gitDir, "modules"), 0o755)
+		pl.ReadOnly = append(pl.ReadOnly,
+			filepath.Join(gitDir, "modules"),
+			filepath.Join(root, ".git"),
+			filepath.Join(gitDir, "config.worktree"),
+			filepath.Join(gitDir, "commondir"))
+		// Absent, the agent could create it in its writable gitdir and
+		// the host's git would read it once extensions.worktreeConfig is
+		// on. An empty one changes nothing and can be mounted read-only.
+		if cw := filepath.Join(gitDir, "config.worktree"); !exists(cw) {
+			_ = os.WriteFile(cw, nil, 0o644)
+		}
+	}
+	// Hooks dirs, included config and filter scripts that git config points
+	// at inside the worktree would run on the host after the agent edits
+	// them (core.hooksPath=.husky is the common case).
+	pl.ReadOnly = append(pl.ReadOnly, WritableGitPaths(root)...)
+}
+
 // NewPlan builds the plan for a worktree.
 func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (Plan, error) {
 	sizeName := sizeFlag
@@ -144,53 +249,12 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 	name := NameFor(root)
 	pl := Plan{Name: name, ID: Prefix + name, Root: root, SizeName: sn, Size: size}
 
-	common, gitDir := gitPaths(root)
-	if common != "" {
-		if !within(common, root) {
-			pl.ExtraRW = append(pl.ExtraRW, common)
-		}
-		// Everything under the common dir that decides what the host's git
-		// runs, for this worktree or any other:
-		//   hooks/, config      this repo
-		//   worktrees/          every linked worktree's commondir and
-		//                       config.worktree: rewriting another worktree's
-		//                       commondir points the host's git at a config
-		//                       the agent wrote
-		//   modules/            submodules' own config and hooks
-		// Make sure the dirs exist so the agent can't create them.
-		for _, d := range []string{"hooks", "worktrees", "modules"} {
-			_ = os.MkdirAll(filepath.Join(common, d), 0o755)
-		}
-		pl.ReadOnly = append(pl.ReadOnly,
-			filepath.Join(common, "hooks"), filepath.Join(common, "config"),
-			filepath.Join(common, "worktrees"), filepath.Join(common, "modules"))
-		if gitDir != "" && gitDir != common {
-			// A linked worktree: its own gitdir (HEAD, index) lives under
-			// worktrees/ and must stay writable, but its .git file and gitdir
-			// pointers decide which config the host's git reads.
-			if within(gitDir, filepath.Join(common, "worktrees")) {
-				pl.ReopenRW = append(pl.ReopenRW, gitDir)
-			}
-			// A linked worktree keeps its submodules' git dirs in its own
-			// gitdir, not the common one.
-			_ = os.MkdirAll(filepath.Join(gitDir, "modules"), 0o755)
-			pl.ReadOnly = append(pl.ReadOnly,
-				filepath.Join(gitDir, "modules"),
-				filepath.Join(root, ".git"),
-				filepath.Join(gitDir, "config.worktree"),
-				filepath.Join(gitDir, "commondir"))
-			// Absent, the agent could create it in its writable gitdir and
-			// the host's git would read it once extensions.worktreeConfig is
-			// on. An empty one changes nothing and can be mounted read-only.
-			if cw := filepath.Join(gitDir, "config.worktree"); !exists(cw) {
-				_ = os.WriteFile(cw, nil, 0o644)
-			}
-		}
+	mode, err := GitMode(g, p)
+	if err != nil {
+		return Plan{}, err
 	}
-	// Hooks dirs, included config and filter scripts that git config points
-	// at inside the worktree would run on the host after the agent edits
-	// them (core.hooksPath=.husky is the common case).
-	pl.ReadOnly = append(pl.ReadOnly, WritableGitPaths(root)...)
+	pl.Git = mode
+	pl.guardGit(root, mode)
 	// A directory already mounted (read-only or reopened) can't be renamed
 	// either, and mounting it again rw as a pin would undo the read-only one.
 	mounted := map[string]bool{}
@@ -203,7 +267,7 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 		}
 	}
 
-	pl.Masks = FindMasks(root, append(append([]string{}, g.Masks...), p.Mask...), append(append([]string{}, g.Unmask...), p.Unmask...))
+	pl.Masks = append(pl.Masks, FindMasks(root, append(append([]string{}, g.Masks...), p.Mask...), append(append([]string{}, g.Unmask...), p.Unmask...))...)
 	return pl, nil
 }
 
@@ -292,6 +356,7 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 	for _, p := range pl.ExtraRW {
 		mounts = append(mounts, backend.Mount{Source: p, Target: p})
 	}
+	mounts = append(mounts, pl.ExtraMounts...)
 	return backend.CageSpec{
 		ID:       pl.ID,
 		Image:    g.CageImage,

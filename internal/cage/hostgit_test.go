@@ -88,3 +88,46 @@ func TestHooksPathInWorktreeIsGuarded(t *testing.T) {
 		}
 	}
 }
+
+func TestGitModes(t *testing.T) {
+	t.Setenv("ZOO_HOME", t.TempDir())
+	root := gitInit(t)
+	g := config.Defaults()
+
+	ro, err := NewPlan(root, g, config.Project{Git: "ro"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(ro.ReadOnly, filepath.Join(root, ".git")) || len(ro.ReopenRW) != 0 {
+		t.Fatalf("git: ro should make all of .git read-only: %+v", ro)
+	}
+
+	none, err := NewPlan(root, g, config.Project{Git: "none"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none.ExtraMounts) != 1 || none.ExtraMounts[0].Target != filepath.Join(root, ".git") || !none.ExtraMounts[0].ReadOnly {
+		t.Fatalf("git: none should cover .git with an empty dir: %+v", none.ExtraMounts)
+	}
+
+	// The global default applies; zoo.yaml overrides it.
+	g.Git = "none"
+	if p, _ := NewPlan(root, g, config.Project{}, ""); p.Git != GitNone {
+		t.Fatalf("global git default ignored: %s", p.Git)
+	}
+	if p, _ := NewPlan(root, g, config.Project{Git: "rw"}, ""); p.Git != GitRW {
+		t.Fatalf("zoo.yaml git ignored: %s", p.Git)
+	}
+	if _, err := NewPlan(root, g, config.Project{Git: "yolo"}, ""); err == nil {
+		t.Fatal("bad git mode accepted")
+	}
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}

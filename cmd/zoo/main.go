@@ -1226,6 +1226,7 @@ func cmdDoctor(args []string) error {
 			"ZOO_MASKS=" + strings.Join(pl.Masks, "\n"),
 			"ZOO_READONLY=" + strings.Join(pl.ReadOnly, "\n"),
 			"ZOO_PIN=" + strings.Join(pl.Pin, "\n"),
+			"ZOO_GIT=" + pl.Git,
 			"ZOO_KEEPER=" + ip,
 			"ZOO_DASH_PORT=" + strconv.Itoa(g.Port),
 			"ZOO_HOST_GATEWAY_EXPECTED=" + strconv.FormatBool(e.info.Caps.HostGatewayReachable),

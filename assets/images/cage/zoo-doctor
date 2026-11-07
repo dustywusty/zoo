@@ -98,7 +98,7 @@ if [ -n "$common" ] && [ -d "$common/worktrees" ]; then
       pass "git-worktrees" "$(basename "$d") can't be redirected"
     fi
   done
-  if [ -n "$own" ] && [ "$own" != "$common" ]; then
+  if [ -n "$own" ] && [ "$own" != "$common" ] && [ "${ZOO_GIT:-rw}" = "rw" ]; then
     if touch "$own/.zoo-doctor" 2>/dev/null; then
       rm -f "$own/.zoo-doctor"
       pass "git-own" "this worktree's gitdir is writable"
@@ -107,6 +107,15 @@ if [ -n "$common" ] && [ -d "$common/worktrees" ]; then
     fi
   fi
 fi
+
+# 6a'. git: ro means nothing in .git is writable; git: none means no .git.
+case "${ZOO_GIT:-rw}" in
+  ro)
+    gd=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    if [ -n "$gd" ] && touch "$gd/.zoo-doctor" 2>/dev/null; then rm -f "$gd/.zoo-doctor"; fail "git-mode" "git: ro but $gd is writable"; else pass "git-mode" "git: ro, .git is read-only"; fi ;;
+  none)
+    if git rev-parse --git-dir >/dev/null 2>&1; then fail "git-mode" "git: none but a repository is visible"; else pass "git-mode" "git: none, no repository in the cage"; fi ;;
+esac
 
 # 6b. Directories holding read-only paths can't be renamed (a rename would
 # carry the read-only mounts away and let the agent plant a fresh .git/config).

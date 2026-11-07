@@ -44,6 +44,10 @@ func Trust() string                  { return filepath.Join(Home(), "trust") }
 // whole parent directory with the guest.
 func MaskFile() string { return filepath.Join(Home(), "mask", "empty") }
 
+// EmptyDir is an empty, read-only directory mounted over a git dir when a
+// cage gets no .git (git: none).
+func EmptyDir() string { return filepath.Join(Home(), "empty-dir") }
+
 // Ensure creates the directory tree. The keeper log dir is world-writable
 // because squid writes it from inside its VM as the "proxy" user.
 func Ensure() error {
@@ -65,6 +69,10 @@ func Ensure() error {
 			return err
 		}
 	}
+	if err := os.MkdirAll(EmptyDir(), 0o755); err != nil {
+		return err
+	}
+	_ = os.Chmod(EmptyDir(), 0o555)
 	// keeper/ itself must be traversable for the mount.
 	_ = os.Chmod(filepath.Join(Home(), "keeper"), 0o755)
 	_ = os.Chmod(KeeperEtc(), 0o755)
