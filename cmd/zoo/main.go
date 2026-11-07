@@ -61,7 +61,7 @@ Usage:
   zoo refs [ok] [cage]           branches and tags a cage moved besides its own (ok: accept them)
   zoo keys set|rm <name>         store a credential in the Keychain (e.g. "claude", "codex")
   zoo keys ls                    which harness credentials are stored
-  zoo shims install|uninstall    put claude/codex/... shims on PATH so other tools land in cages
+  zoo shims install [--path]|uninstall  shims so other tools land in cages (--path: Windows user PATH)
   zoo doctor [cage]              prove the walls hold from inside a cage
   zoo dash                       open the dashboard
   zoo build [cage|keeper]        (re)build images
@@ -81,6 +81,10 @@ Escape hatch: ZOO=off claude ...  runs the real CLI outside any cage.
 `
 
 func main() {
+	// Started as <harness>.exe from the shims dir (Windows shims): be the shim.
+	if h, ok := shims.Invoked(); ok {
+		os.Exit(shims.Run(h, os.Args[1:]))
+	}
 	argv, err := parseGlobal(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "zoo:", err)
@@ -1086,6 +1090,9 @@ func cmdKeys(args []string) error {
 		fmt.Fprintln(tw, "ITEM\tSOURCE\tAVAILABLE\tUSED BY")
 		row := func(item, usedBy string) {
 			src, name := keys.Describe(item)
+			if src == "keychain" {
+				src = keys.StoreName() // where zoo keeps its own items on this OS
+			}
 			ok, hint := keys.Available(item)
 			avail := "yes"
 			if !ok {
@@ -1126,7 +1133,7 @@ func cmdKeys(args []string) error {
 			if err != nil {
 				return err
 			}
-			v := strings.TrimRight(string(b), "\n")
+			v := strings.TrimRight(string(b), "\r\n") // Windows pipes end lines with \r\n
 			if v == "" {
 				return errors.New("empty value on stdin")
 			}
@@ -1178,7 +1185,23 @@ func cmdShims(args []string) error {
 		for _, w := range written {
 			fmt.Println("  " + w)
 		}
-		if !shims.OnPath() {
+		setPath := len(args) > 1 && args[1] == "--path"
+		switch {
+		case setPath:
+			changed, err := shims.SetUserPath(paths.Shims(), true)
+			if err != nil {
+				return err
+			}
+			if changed {
+				fmt.Printf("\n%s is now first on your user PATH. Restart Orca, Conductor and open terminals so they pick it up.\n", paths.Shims())
+			} else {
+				fmt.Printf("\n%s was already first on your user PATH.\n", paths.Shims())
+			}
+			fmt.Println("Escape hatch: set ZOO=off to run the real CLI.")
+		case shims.OnPath():
+		case runtime.GOOS == "windows":
+			fmt.Printf("\nPut %s first on your user PATH so other apps find these shims:\n\n  zoo shims install --path\n\nThen restart Orca, Conductor and terminals. Escape hatch: set ZOO=off.\n", paths.Shims())
+		default:
 			fmt.Printf("\nAdd this as the LAST line of ~/.zshrc (and ~/.zprofile, so GUI apps that read your login shell see it):\n\n  export PATH=\"%s:$PATH\"\n\nEscape hatch: ZOO=off claude …\n", paths.Shims())
 		}
 		return nil
@@ -1186,6 +1209,11 @@ func cmdShims(args []string) error {
 		removed, err := shims.Uninstall()
 		for _, r := range removed {
 			fmt.Println("removed " + r)
+		}
+		if runtime.GOOS == "windows" {
+			if changed, perr := shims.SetUserPath(paths.Shims(), false); perr == nil && changed {
+				fmt.Printf("removed %s from your user PATH\n", paths.Shims())
+			}
 		}
 		return err
 	}

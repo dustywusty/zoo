@@ -93,8 +93,44 @@ func TestDaemonReadsUseTheAPI(t *testing.T) {
 	}
 }
 
+func TestLocalHost(t *testing.T) {
+	for in, want := range map[string]string{
+		"/run/user/1000/podman/podman.sock":       "unix:///run/user/1000/podman/podman.sock",
+		"unix:///run/podman/podman.sock":          "unix:///run/podman/podman.sock",
+		`\\.\pipe\podman-machine-default`:         "npipe:////./pipe/podman-machine-default",
+		"npipe:////./pipe/podman-machine-default": "npipe:////./pipe/podman-machine-default",
+		"<no value>": "",
+		"":           "",
+	} {
+		if got := localHost(in); got != want {
+			t.Errorf("localHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Podman's API is found through CONTAINER_HOST (or its service socket) and
+// used the same way as docker's.
+func TestPodmanUsesItsAPI(t *testing.T) {
+	e := fakeengine.Start(t)
+	t.Setenv("CONTAINER_HOST", e.Host)
+	t.Setenv("ZOO_DOCKER_BIN", "")
+	t.Setenv("ZOO_DOCKER_API", "")
+	e.Set(fakeengine.Container{ID: "c", Name: "zoo-api-1", State: "running"})
+	d := New("podman", backend.Options{Bin: "zoo-test-no-such-podman-cli"})
+	if d.api(context.Background()) == nil {
+		t.Fatal("podman API not used")
+	}
+	if all, err := d.List(context.Background()); err != nil || len(all) != 1 {
+		t.Fatalf("list via podman api: %v %v", all, err)
+	}
+	// Podman's host bridge is fixed (host.containers.internal), not asked of the API.
+	if _, dial, _ := d.HostBridge(context.Background()); dial != "host.containers.internal" {
+		t.Errorf("podman host bridge = %s", dial)
+	}
+}
+
 // A substituted CLI (the contract tests' fake) or ZOO_DOCKER_API=off keeps
-// everything on the CLI, and so does podman.
+// everything on the CLI.
 func TestAPIOff(t *testing.T) {
 	e := fakeengine.Start(t)
 	t.Setenv("DOCKER_HOST", e.Host)
@@ -109,7 +145,37 @@ func TestAPIOff(t *testing.T) {
 			}
 		})
 	}
-	if d := New("podman", backend.Options{}); d.api(context.Background()) != nil {
-		t.Error("api used for podman")
+	// DOCKER_HOST is docker's; podman reads CONTAINER_HOST. (Bin: a missing CLI,
+	// so the podman info fallback finds nothing either.)
+	t.Setenv("CONTAINER_HOST", "")
+	if d := New("podman", backend.Options{Bin: "zoo-test-no-such-podman-cli"}); d.api(context.Background()) != nil {
+		t.Error("podman used DOCKER_HOST")
+	}
+}
+
+func TestCPURate(t *testing.T) {
+	var r cpuRate
+	t0 := time.Unix(1000, 0)
+	if _, ok := r.add(5e9, t0); ok {
+		t.Fatal("rate from one reading")
+	}
+	// Readings microseconds apart (podman's first samples) don't make a rate.
+	if _, ok := r.add(5e9+1000, t0.Add(10*time.Microsecond)); ok {
+		t.Fatal("rate from a burst")
+	}
+	// One busy core for a second: 100%.
+	if v, ok := r.add(6e9, t0.Add(time.Second)); !ok || v < 99.9 || v > 100.1 {
+		t.Fatalf("one core = %v %v", v, ok)
+	}
+	// Two cores' worth over the next second: 200%; in-between readings keep the last value.
+	if v, ok := r.add(6.5e9, t0.Add(1200*time.Millisecond)); !ok || v < 99.9 || v > 100.1 {
+		t.Fatalf("held = %v %v", v, ok)
+	}
+	if v, _ := r.add(8e9, t0.Add(2*time.Second)); v < 199.9 || v > 200.1 {
+		t.Fatalf("two cores = %v", v)
+	}
+	// Counter reset (container restarted): no bogus negative rate.
+	if v, _ := r.add(1e6, t0.Add(3*time.Second)); v < 0 {
+		t.Fatalf("after reset = %v", v)
 	}
 }

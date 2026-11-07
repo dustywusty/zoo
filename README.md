@@ -20,7 +20,7 @@ One of these backends:
 |---|---|---|---|
 | `apple` | macOS 26+, Apple silicon, [`container`](https://github.com/apple/container/releases) | `vm`: a VM per cage | Default when installed. |
 | `docker` | OrbStack, Docker Desktop, colima, Docker Engine (macOS or Linux); Docker Desktop on Windows | `container`: cages share one kernel | Set `docker.runtime: kata` (`microvm`) or `runsc` (`sandboxed-container`) on Linux for more. |
-| `podman` | Podman (machine on macOS, native on Linux) | `container` | Same driver as docker. |
+| `podman` | Podman (machine on macOS, native on Linux) | `container` | Same driver as docker. The dashboard watches it through its API service when one is running (Linux: `systemctl --user enable --now podman.socket`), else polls the CLI. |
 
 Go 1.24+ to build from source.
 
@@ -44,7 +44,11 @@ The isolation level is shown in `zoo ls`, `zoo status`, `zoo doctor` and on ever
 
 Docker Desktop (WSL 2 backend), with `--isolation-floor container`. Cages share Docker Desktop's Linux VM kernel, not Windows'. Your worktree appears inside the cage as `/c/Users/you/repo`; zoo rewrites git's pointer files for the cage (yours aren't touched) and passes your `core.autocrlf` through, so git in the cage sees the same clean tree you do. The dashboard daemon runs without a window and watches Docker through its API rather than launching `docker` repeatedly.
 
-Not on Windows yet: keychain storage (credentials fall back to 0600 files under `%USERPROFILE%\.zoo\keys`), shims for other tools (use `zoo run` directly), and SSH agent grants. Repos on network shares (`\\server\…`) can't be caged. Large `node_modules` trees are slow over Docker Desktop's file sharing.
+- **Credentials** (`zoo keys set`) go to Windows Credential Manager, as generic credentials named `zoo:<name>` (Control Panel → Credential Manager → Windows Credentials).
+- **Shims** are small `.exe` copies of zoo (`claude.exe`, `codex.exe`) in `%USERPROFILE%\.zoo\shims`, because Node-based tools like Orca and Conductor won't launch `.cmd` files. `zoo shims install --path` puts that folder first on your user PATH; restart Orca and your terminals afterwards. `set ZOO=off` runs the real CLI.
+- **SSH agent grants** use the Windows agent pipe (`\\.\pipe\openssh-ssh-agent`), which the OpenSSH agent service, 1Password and Bitwarden all serve: a service with `ssh-agent: system`, `1password` or `bitwarden` works.
+
+Repos on network shares (`\\server\…`) can't be caged. Large `node_modules` trees are slow over Docker Desktop's file sharing.
 
 ## Install
 
