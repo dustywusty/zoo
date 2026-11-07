@@ -54,6 +54,33 @@ type Global struct {
 
 	// Git is the default for what cages may do with .git: rw | ro | none.
 	Git string `yaml:"git"`
+
+	// Credentials stay on the host; cages get a placeholder that the keeper
+	// swaps for the real value on the way to the credential's hosts.
+	Credentials map[string]Credential `yaml:"credentials"`
+}
+
+// Credential is a secret the keeper adds to requests for some hosts, plus
+// what those hosts may be asked to do. Cages only ever see a placeholder.
+type Credential struct {
+	Hosts  []string `yaml:"hosts" json:"hosts"`   // where the real value may go (exact names)
+	Secret string   `yaml:"secret" json:"secret"` // keychain item, bw:item[/field] or op://vault/item/field
+	// Env names variables that hold the placeholder in granted cages
+	// (GH_TOKEN, GITHUB_TOKEN, ...).
+	Env []string `yaml:"env" json:"env,omitempty"`
+	// Prefix goes in front of the placeholder, for tools that check a
+	// token's shape (e.g. "ghp_").
+	Prefix string `yaml:"prefix" json:"prefix,omitempty"`
+	// Git makes git in granted cages use the credential for https remotes on
+	// Hosts (user x-access-token), and fetch ssh remotes there over https.
+	Git bool `yaml:"git" json:"git,omitempty"`
+	// AllCages grants it to every cage (model keys for harnesses).
+	AllCages bool `yaml:"all_cages" json:"all_cages,omitempty"`
+
+	// Policy on Hosts, for every request (with or without the credential):
+	ReadOnly bool     `yaml:"readonly" json:"readonly,omitempty"` // only reads: GET/HEAD, GraphQL queries, git fetch
+	Push     []string `yaml:"push" json:"push,omitempty"`         // git push allowed to these branches ("agent/*"); implies nothing else
+	Repos    []string `yaml:"repos" json:"repos,omitempty"`       // owner/repo the API and git may touch (GitHub-style paths)
 }
 
 // Service is a host port, a sidecar, a remote TCP destination or an SSH
@@ -85,7 +112,7 @@ type Project struct {
 	Harness  string   `yaml:"harness"`
 	Mask     []string `yaml:"mask"`
 	Unmask   []string `yaml:"unmask"`
-	Services []string `yaml:"services"` // services granted to this repo's cage
+	Services []string `yaml:"services"` // services and credentials granted to this repo's cage
 	Git      string   `yaml:"git"`      // rw (default) | ro | none
 	Mounts   []string `yaml:"mounts"`   // further worktrees in the same cage (relative to this one, or ~/...)
 }
@@ -110,9 +137,14 @@ func Defaults() Global {
 		BytesOutAlert: 5 << 20,
 		// Bump the tag when the images or the mounts they expect change:
 		// zoo rebuilds missing images and replaces instances on an old tag.
-		CageImage:      "zoo-cage:m3",
-		KeeperImage:    "zoo-keeper:m3",
-		Network:        "zoo-cages",
+		CageImage:   "zoo-cage:m4",
+		KeeperImage: "zoo-keeper:m4",
+		Network:     "zoo-cages",
+		Credentials: map[string]Credential{
+			// Used by harnesses whose env says "cred:claude" / "cred:codex".
+			"claude": {Hosts: []string{"api.anthropic.com"}, Secret: "claude", AllCages: true, Prefix: "sk-ant-oat01-"},
+			"codex":  {Hosts: []string{"api.openai.com"}, Secret: "codex", AllCages: true, Prefix: "sk-"},
+		},
 		Backend:        "auto",
 		IsolationFloor: "microvm",
 	}
@@ -175,6 +207,12 @@ func merge(g *Global, f Global) {
 	}
 	if f.IsolationFloor != "" {
 		g.IsolationFloor = f.IsolationFloor
+	}
+	if g.Credentials == nil {
+		g.Credentials = map[string]Credential{}
+	}
+	for k, v := range f.Credentials {
+		g.Credentials[k] = v
 	}
 	if f.Git != "" {
 		g.Git = f.Git
@@ -252,7 +290,20 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 #   redis:  { image: redis:7, port: 6379 }            # a sidecar zoo runs
 #   gh-ssh: { remote: github.com:22 }                 # non-HTTP egress
 #   keys:   { ssh-agent: bitwarden, keys: [github], hosts: [github.com] }
+# credentials:              # secrets that never enter a cage: cages get a placeholder and the
+#                            # keeper swaps in the real value for these hosts only (zoo grant)
+#   github:
+#     hosts: [github.com, api.github.com]
+#     secret: github-pat      # zoo keys set github-pat (a fine-grained token)
+#     env: [GH_TOKEN, GITHUB_TOKEN]
+#     git: true               # git over https uses it; ssh remotes are fetched over https
+#     readonly: true          # reads only: GET, GraphQL queries, git fetch...
+#     push: ["agent/*"]       # ...plus git push to these branches
+#     repos: [you/app]        # and only these repositories
 # harnesses:
+#   claude:                   # keep the model token in the keeper too:
+#     command: claude
+#     env: { CLAUDE_CODE_OAUTH_TOKEN: "cred:claude" }
 #   pi:
 #     command: pi
 #     env: { ANTHROPIC_API_KEY: anthropic }   # ENV_VAR: keychain item (zoo keys set anthropic)

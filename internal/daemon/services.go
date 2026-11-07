@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -21,7 +22,9 @@ import (
 
 	"github.com/dusty/zoo/internal/cage"
 	"github.com/dusty/zoo/internal/config"
+	"github.com/dusty/zoo/internal/inject"
 	"github.com/dusty/zoo/internal/keeper"
+	"github.com/dusty/zoo/internal/keys"
 	"github.com/dusty/zoo/internal/paths"
 	"github.com/dusty/zoo/internal/services"
 	"github.com/dusty/zoo/internal/sshagent"
@@ -90,10 +93,11 @@ type svcState struct {
 	grants   map[string][]string
 	agents   map[string]*sshagent.Proxy // by service name
 	agentErr map[string]string
+	secrets  map[string]cachedSecret
 }
 
 func newSvcState() *svcState {
-	return &svcState{pending: map[string]*Pending{}, grants: map[string][]string{}, agents: map[string]*sshagent.Proxy{}, agentErr: map[string]string{}}
+	return &svcState{pending: map[string]*Pending{}, grants: map[string][]string{}, agents: map[string]*sshagent.Proxy{}, agentErr: map[string]string{}, secrets: map[string]cachedSecret{}}
 }
 
 // --- sync ---------------------------------------------------------------------
@@ -104,6 +108,8 @@ func (s *Server) syncServices(cs []cage.Info) {
 	if g, err := config.LoadGlobal(); err == nil {
 		s.mu.Lock()
 		s.cfg.Services = g.Services
+		s.cfg.Credentials = g.Credentials
+		s.cfg.Harnesses = g.Harnesses
 		s.mu.Unlock()
 	}
 	s.mu.Lock()
@@ -113,7 +119,23 @@ func (s *Server) syncServices(cs []cage.Info) {
 	if err != nil {
 		log.Printf("services: %v", err)
 	}
+	if grants != nil {
+		if _, reload, err := inject.Activate(cfg, grants); err != nil {
+			log.Printf("credentials: %v", err)
+		} else if reload {
+			if err := keeper.Reload(context.Background(), s.backend); err != nil {
+				log.Printf("keeper reload: %v", err)
+			}
+		}
+	}
 	var views []ServiceView
+	for _, n := range inject.Names(cfg.Credentials) {
+		c := cfg.Credentials[n]
+		if c.AllCages && len(c.Env) == 0 && !c.Git {
+			continue // a harness's model key, not something to grant
+		}
+		views = append(views, ServiceView{Name: n, Kind: "credential", Target: strings.Join(c.Hosts, " "), Status: "ready"})
+	}
 	for _, n := range services.Names(cfg.Services) {
 		v := ServiceView{Name: n, Kind: services.Kind(cfg.Services[n]), Target: services.Target(cfg.Services[n]), Port: services.ListenPort(cfg.Services[n])}
 		v.Status, v.Note = s.serviceStatus(n, cfg.Services[n])
@@ -225,6 +247,10 @@ func (s *Server) bridgeConn(ctx context.Context, conn net.Conn, tok string) {
 		return
 	}
 	name, cageName := f[2], f[3]
+	if name == "@cred" {
+		s.credAnswer(conn, f[3])
+		return
+	}
 	s.mu.Lock()
 	sv, ok := s.cfg.Services[name]
 	s.mu.Unlock()
@@ -259,6 +285,71 @@ func (s *Server) bridgeConn(ctx context.Context, conn net.Conn, tok string) {
 	default:
 		io.WriteString(conn, "ERR not a bridge service\n")
 	}
+}
+
+// credAnswer gives the keeper's injector a credential's real value for a
+// placeholder, if the placeholder is genuine (HMAC), the cage it names is
+// running and holds the credential, and the value resolves on this machine.
+func (s *Server) credAnswer(conn net.Conn, ph string) {
+	cred, cageName, ok := inject.Parse(ph)
+	if !ok {
+		io.WriteString(conn, "NO not a zoo placeholder\n")
+		return
+	}
+	s.mu.Lock()
+	c, known := s.cfg.Credentials[cred]
+	running := false
+	for _, cg := range s.cages {
+		if cg.Name == cageName && cg.Running {
+			running = true
+		}
+	}
+	s.mu.Unlock()
+	switch {
+	case !known:
+		io.WriteString(conn, "NO no such credential\n")
+		return
+	case !running:
+		io.WriteString(conn, "NO cage isn't running\n")
+		return
+	case !c.AllCages && !s.granted(cageName, cred):
+		io.WriteString(conn, "NO not granted (zoo grant "+cageName+" "+cred+")\n")
+		return
+	}
+	val, err := s.secretValue(c.Secret)
+	if err != nil || val == "" {
+		msg := "no value stored (zoo keys set " + c.Secret + ")"
+		if err != nil {
+			msg = err.Error()
+		}
+		io.WriteString(conn, "NO "+strings.ReplaceAll(msg, "\n", " ")+"\n")
+		return
+	}
+	io.WriteString(conn, "OK "+base64.StdEncoding.EncodeToString([]byte(val))+"\n")
+}
+
+// secretValue resolves a keychain item or vault reference, caching it for a
+// few minutes so the keychain isn't asked on every request.
+func (s *Server) secretValue(item string) (string, error) {
+	s.svc.mu.Lock()
+	if c, ok := s.svc.secrets[item]; ok && time.Since(c.at) < 5*time.Minute {
+		s.svc.mu.Unlock()
+		return c.val, nil
+	}
+	s.svc.mu.Unlock()
+	v, err := keys.Resolve(item)
+	if err != nil {
+		return "", err
+	}
+	s.svc.mu.Lock()
+	s.svc.secrets[item] = cachedSecret{val: v, at: time.Now()}
+	s.svc.mu.Unlock()
+	return v, nil
+}
+
+type cachedSecret struct {
+	val string
+	at  time.Time
 }
 
 func (s *Server) granted(cageName, service string) bool {
@@ -410,6 +501,9 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	_, known := s.cfg.Services[body.Service]
+	if _, cred := s.cfg.Credentials[body.Service]; cred {
+		known = true
+	}
 	var c *cage.Info
 	for i := range s.cages {
 		if s.cages[i].Name == body.Cage {

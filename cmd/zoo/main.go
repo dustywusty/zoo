@@ -31,6 +31,7 @@ import (
 	"github.com/dusty/zoo/internal/cage"
 	"github.com/dusty/zoo/internal/config"
 	"github.com/dusty/zoo/internal/daemon"
+	"github.com/dusty/zoo/internal/inject"
 	"github.com/dusty/zoo/internal/keeper"
 	"github.com/dusty/zoo/internal/keys"
 	"github.com/dusty/zoo/internal/paths"
@@ -545,9 +546,15 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 			warnGitRisks(r)
 		}
 	}
-	syncKeeper(ctx, e)
+	active := syncKeeper(ctx, e)
 	if err := applyServices(ctx, e, pl.Name, pl.ID, ip); err != nil {
 		say("services: %v", err)
+	}
+	if cs, err := cage.List(ctx, e.b); err == nil {
+		grants := services.GrantsFor(e.g, cs)[pl.Name]
+		if err := inject.ApplyToCage(ctx, e.b, e.g, active, pl.ID, pl.Name, grants); err != nil {
+			say("credentials: %v", err)
+		}
 	}
 	return pl, ip, nil
 }
@@ -601,16 +608,26 @@ or pass --allow-weaker-isolation for one run, or use a stronger backend (zoo bac
 		e.info.Caps.Isolation, paths.Config())
 }
 
-// syncKeeper re-renders the gate's grants from the cages' current IPs, and
-// starts granted sidecars.
-func syncKeeper(ctx context.Context, e env) {
+// syncKeeper re-renders the gate's grants from the cages' current IPs,
+// starts granted sidecars, and updates which hosts the keeper intercepts for
+// credentials. Returns the active credentials.
+func syncKeeper(ctx context.Context, e env) map[string]config.Credential {
 	cs, err := cage.List(ctx, e.b)
 	if err != nil {
-		return
+		return nil
 	}
-	if _, err := services.Sync(ctx, e.b, e.g, cs); err != nil {
+	grants, err := services.Sync(ctx, e.b, e.g, cs)
+	if err != nil {
 		say("services: %v", err)
 	}
+	active, reload, err := inject.Activate(e.g, grants)
+	if err != nil {
+		say("credentials: %v", err)
+	}
+	if reload {
+		reloadIfUp(ctx, e)
+	}
+	return active
 }
 
 func runIn(o runOpts, cageName string) error {
@@ -646,10 +663,20 @@ func runIn(o runOpts, cageName string) error {
 		"TERM=" + envOr("TERM", "xterm-256color"), "COLORTERM=" + os.Getenv("COLORTERM"), "LANG=" + envOr("LANG", "en_US.UTF-8"),
 	}, cage.ProxyEnv(ip)...)
 	if cs, err := cage.List(ctx, e.b); err == nil {
-		env = append(env, services.SessionEnv(e.g, services.GrantsFor(e.g, cs)[pl.Name])...)
+		grants := services.GrantsFor(e.g, cs)
+		env = append(env, services.SessionEnv(e.g, grants[pl.Name])...)
+		active, _, _ := inject.Activate(e.g, grants)
+		credEnv, err := inject.Env(e.g, active, pl.Name, grants[pl.Name], h.Env)
+		if err != nil {
+			return err
+		}
+		env = append(env, credEnv...)
 	}
 	var missing []string
 	for envName, item := range h.Env {
+		if strings.HasPrefix(item, "cred:") {
+			continue // a placeholder; the keeper holds the value
+		}
 		// Keychain item, or a vault reference (bw:…, op://…) fetched on this
 		// machine; the vault session itself never enters the cage.
 		v, err := keys.Resolve(item)

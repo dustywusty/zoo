@@ -58,6 +58,8 @@ type gate struct {
 func main() {
 	confPath := flag.String("config", "/etc/zoo/gate.json", "gate config")
 	logPath := flag.String("log", "/var/log/zoo/gate.log", "connection log")
+	injectPath := flag.String("inject-config", "/etc/zoo/inject/inject.json", "credential injector config")
+	injectLog := flag.String("inject-log", "/var/log/zoo/inject.log", "credential injector log")
 	flag.Parse()
 
 	f, err := os.OpenFile(*logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -66,6 +68,7 @@ func main() {
 	}
 	g := &gate{listeners: map[int]net.Listener{}, logw: f}
 	g.cfg.Store(&config{})
+	go runInjector(g, *injectPath, *injectLog)
 	var lastMod time.Time
 	var lastSize int64 = -1
 	for {

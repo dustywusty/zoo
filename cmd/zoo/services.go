@@ -11,6 +11,7 @@ import (
 
 	"github.com/dusty/zoo/internal/cage"
 	"github.com/dusty/zoo/internal/config"
+	"github.com/dusty/zoo/internal/inject"
 	"github.com/dusty/zoo/internal/paths"
 	"github.com/dusty/zoo/internal/services"
 )
@@ -26,7 +27,7 @@ func cmdService(args []string) error {
 	if err := services.Validate(g.Services); err != nil {
 		return err
 	}
-	if len(g.Services) == 0 {
+	if len(g.Services) == 0 && len(userCredentials(g)) == 0 {
 		fmt.Printf("no services yet. Add them under services: in %s, e.g.\n\n%s", paths.Config(), serviceExample)
 		return nil
 	}
@@ -53,6 +54,34 @@ func cmdService(args []string) error {
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s:%d\t%s\n", n, services.Kind(s), services.Target(s), services.HostName(n), services.ListenPort(s), to)
 	}
+	for _, n := range userCredentials(g) {
+		c := g.Credentials[n]
+		to := strings.Join(by[n], ", ")
+		if c.AllCages {
+			to = "every cage"
+		} else if to == "" {
+			to = "-"
+		}
+		var pol []string
+		if c.ReadOnly || len(c.Push) > 0 {
+			pol = append(pol, "read-only")
+		}
+		if len(c.Push) > 0 {
+			pol = append(pol, "push "+strings.Join(c.Push, ","))
+		}
+		if len(c.Repos) > 0 {
+			pol = append(pol, "repos "+strings.Join(c.Repos, ","))
+		}
+		as := strings.Join(c.Env, ",")
+		if c.Git {
+			as = strings.TrimPrefix(as+",git", ",")
+		}
+		target := strings.Join(c.Hosts, ",")
+		if len(pol) > 0 {
+			target += " (" + strings.Join(pol, "; ") + ")"
+		}
+		fmt.Fprintf(tw, "%s\tcredential\t%s\t%s\t%s\n", n, target, or(as, "-"), to)
+	}
 	return tw.Flush()
 }
 
@@ -76,8 +105,10 @@ func cmdGrant(verb string, args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := g.Services[args[1]]; !ok {
-		return fmt.Errorf("no service %q (zoo service ls)", args[1])
+	_, isSvc := g.Services[args[1]]
+	cred, isCred := g.Credentials[args[1]]
+	if !isSvc && !isCred {
+		return fmt.Errorf("no service or credential %q (zoo service ls)", args[1])
 	}
 	ctx := context.Background()
 	e, err := resolve(ctx, g)
@@ -95,7 +126,12 @@ func cmdGrant(verb string, args []string) error {
 	if err := grantChange(ctx, e, c, args[1], verb == "grant", until); err != nil {
 		return err
 	}
-	if verb == "grant" {
+	if verb == "grant" && isCred {
+		say("%s holds %s for %s (new sessions get the placeholder; the keeper keeps the value)", c.Name, args[1], strings.Join(cred.Hosts, ", "))
+		if !until.IsZero() {
+			say("until %s; then it's revoked", config.Until(until))
+		}
+	} else if verb == "grant" {
 		say("%s can reach %s as %s:%d", c.Name, args[1], services.HostName(args[1]), services.ListenPort(g.Services[args[1]]))
 		if !until.IsZero() {
 			say("until %s; then it's revoked", config.Until(until))
@@ -171,4 +207,25 @@ func takeFor(args []string) ([]string, time.Duration, error) {
 		d = pd
 	}
 	return out, d, nil
+}
+
+// userCredentials are credentials worth listing: not the dormant built-in
+// model-key definitions.
+func userCredentials(g config.Global) []string {
+	var out []string
+	for _, n := range inject.Names(g.Credentials) {
+		c := g.Credentials[n]
+		if c.AllCages && len(c.Env) == 0 && !c.Git {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+func or(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }

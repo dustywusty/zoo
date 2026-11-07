@@ -40,6 +40,10 @@ func ServiceData(name string) string { return filepath.Join(Home(), "services", 
 func Trust() string                  { return filepath.Join(Home(), "trust") }
 func AllowExpiry() string            { return filepath.Join(Home(), "allow-expiry.json") }
 func GrantExpiry() string            { return filepath.Join(Home(), "grant-expiry.json") }
+func CredKey() string                { return filepath.Join(Home(), "cred-key") }
+func InjectDir() string              { return filepath.Join(KeeperEtc(), "inject") }
+func InjectHosts() string            { return filepath.Join(KeeperEtc(), "inject-hosts.txt") }
+func InjectLog() string              { return filepath.Join(KeeperLog(), "inject.log") }
 
 // MaskFile is the empty, read-only file mounted over secrets in cages. It
 // sits alone in its own directory: some runtimes share a single-file mount's

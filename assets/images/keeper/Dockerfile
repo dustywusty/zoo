@@ -1,8 +1,8 @@
-# zoo keeper image: squid (web egress) + zoo-gate (granted services), the only
-# ways out of a cage. Attached to the cage network(s) and one with a route out.
+# zoo keeper image: squid (web egress) + zoo-gate (granted services and the
+# credential injector), the only ways out of a cage. Attached to the cage network(s) and one with a route out.
 FROM golang:1.24-bookworm AS gate
 WORKDIR /src
-COPY gate/main.go .
+COPY gate/*.go .
 RUN go mod init zoo-gate && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /zoo-gate .
 
 FROM debian:bookworm-slim
