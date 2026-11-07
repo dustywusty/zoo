@@ -1326,6 +1326,7 @@ func cmdDoctor(args []string) error {
 		"ZOO_READONLY=" + strings.Join(pl.ReadOnly, "\n"),
 		"ZOO_PIN=" + strings.Join(pl.Pin, "\n"),
 		"ZOO_GIT=" + pl.Git,
+		"ZOO_INJECT_HOSTS=" + injectHosts(),
 		"ZOO_KEEPER=" + ip,
 		"ZOO_DASH_PORT=" + strconv.Itoa(g.Port),
 		"ZOO_HOST_GATEWAY_EXPECTED=" + strconv.FormatBool(e.info.Caps.HostGatewayReachable),
@@ -1449,4 +1450,13 @@ func cmdBuild(args []string) error {
 		}
 	}
 	return nil
+}
+
+// injectHosts lists the hosts the keeper intercepts for credentials.
+func injectHosts() string {
+	b, err := os.ReadFile(paths.InjectHosts())
+	if err != nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(string(b)), " ")
 }

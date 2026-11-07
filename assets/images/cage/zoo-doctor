@@ -359,3 +359,21 @@ if [ "${ZOO_DEEP:-}" = "1" ]; then
   fi
   rm -rf "$tmp"
 fi
+
+# 12. Credential hosts: the keeper terminates TLS for these (zoo credentials)
+# with its own CA, which this cage must trust; the CA is name-constrained to
+# exactly these hosts.
+if [ -n "${ZOO_INJECT_HOSTS:-}" ] && [ -n "${HTTPS_PROXY:-}" ]; then
+  bad=""
+  for h in $ZOO_INJECT_HOSTS; do
+    err=$(curl -sS -m 15 -o /dev/null https://"$h"/ 2>&1)
+    case "$err" in
+      *certificate*|*SSL*|*TLS*) bad="$bad $h" ;;
+    esac
+  done
+  if [ -n "$bad" ]; then
+    fail "credentials" "TLS to$bad failed: the cage doesn't trust the keeper's CA (zoo reset this cage)"
+  else
+    pass "credentials" "keeper handles $(echo "$ZOO_INJECT_HOSTS" | wc -w | tr -d ' ') credential host(s); CA trusted"
+  fi
+fi
