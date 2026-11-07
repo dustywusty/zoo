@@ -22,6 +22,7 @@ import (
 	"github.com/dusty/zoo/internal/backend"
 	"github.com/dusty/zoo/internal/cage"
 	"github.com/dusty/zoo/internal/config"
+	"github.com/dusty/zoo/internal/gitrefs"
 	"github.com/dusty/zoo/internal/keeper"
 	"github.com/dusty/zoo/internal/paths"
 	"github.com/dusty/zoo/internal/proc"
@@ -412,12 +413,25 @@ func (s *Server) scanGitTraps() {
 			continue
 		}
 		traps, _ := cage.GitTraps(c.Worktree)
+		// Branches and tags moved besides the cage's own, since its session
+		// began (snapshot taken by zoo run). Read from files: no process.
+		var moved []gitrefs.Change
+		if snap, ok := gitrefs.Load(paths.RefSnapshot(c.Name)); ok {
+			common, gitDir := cage.GitDirs(c.Worktree)
+			moved = gitrefs.Alarms(gitrefs.Check(snap, common, gitDir))
+		}
 		var alerts []Alert
 		s.mu.Lock()
 		for _, t := range traps {
 			if s.once("gittrap|"+t.Path+"|"+t.Reason, 24*time.Hour) {
 				alerts = append(alerts, s.newAlert("crit", c.Name, "Planted git repository",
 					fmt.Sprintf("%s (%s). Running git there, or opening it in an editor or a shell with a git prompt, can run commands the agent chose. Inspect and delete it.", t.Path, t.Reason)))
+			}
+		}
+		for _, m := range moved {
+			if s.once("ref|"+c.Name+"|"+m.Ref+"|"+m.To, 24*time.Hour) {
+				alerts = append(alerts, s.newAlert("warn", c.Name, "Branch moved: "+m.Ref,
+					fmt.Sprintf("%s while %s was running. Check it before you push. Undo: %s. If you did it on the host, accept with: zoo refs ok %s", m, c.Name, m.Undo(), c.Name)))
 			}
 		}
 		s.mu.Unlock()

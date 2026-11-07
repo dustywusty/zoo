@@ -1,6 +1,7 @@
 package cage
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -222,5 +223,108 @@ func TestGuestPointer(t *testing.T) {
 		if got, ok := guestPointer(same); ok || got != same {
 			t.Errorf("guestPointer(%q) changed it to %q", same, got)
 		}
+	}
+}
+
+func TestMaskGaps(t *testing.T) {
+	root := t.TempDir()
+	secret := []string{
+		"apps/web/.next/standalone/.env", // build output copying secrets
+		"dist/.env.production",           // build output
+		"a/b/c/d/e/f/g/h/.env",           // deeper than the old limit of 6
+		"infra/prod.tfvars",              // terraform
+		"infra/terraform.tfstate",        //
+		"deploy/service-account-ci.json", // cloud credentials
+		"ops/.kube/config",               // path pattern, any depth
+		".envrc",                         // direnv
+		"worker/.dev.vars",               // wrangler
+		"charts/secrets.yaml",            //
+		"certs/server.pfx",               //
+	}
+	public := []string{
+		"infra/prod.tfvars.example", ".env.example", "node_modules/pkg/.env", "keys/id_ed25519.pub",
+		"docs/kube/config", // not .kube
+		"README.md",
+	}
+	for _, p := range append(append([]string{}, secret...), public...) {
+		write(t, filepath.Join(root, filepath.FromSlash(p)), "x")
+	}
+	g := config.Defaults()
+	got := map[string]bool{}
+	for _, p := range FindMasks(root, g.Masks, g.Unmask) {
+		r, _ := filepath.Rel(root, p)
+		got[filepath.ToSlash(r)] = true
+	}
+	for _, p := range secret {
+		if !got[p] {
+			t.Errorf("not masked: %s", p)
+		}
+	}
+	for _, p := range public {
+		if got[p] {
+			t.Errorf("masked but not secret: %s", p)
+		}
+	}
+}
+
+func TestMaskPathPatterns(t *testing.T) {
+	for _, c := range []struct {
+		pat, rel string
+		want     bool
+	}{
+		{".kube/config", ".kube/config", true},
+		{".kube/config", "a/b/.kube/config", true},
+		{"/.kube/config", "a/.kube/config", false}, // anchored
+		{"/.kube/config", ".kube/config", true},
+		{"config/*.secret.json", "svc/config/db.secret.json", true},
+		{"config/*.secret.json", "config/db.json", false},
+	} {
+		if got := matchRel([]string{c.pat}, filepath.FromSlash(c.rel)); got != c.want {
+			t.Errorf("matchRel(%q, %q) = %v", c.pat, c.rel, got)
+		}
+	}
+}
+
+// Past MaxMasks the plan fails rather than hiding only some secrets.
+func TestTooManyMasksFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i <= MaxMasks; i++ {
+		write(t, filepath.Join(root, "fixtures", fmt.Sprintf("k%04d.key", i)), "k")
+	}
+	if _, complete := FindMasksAll(root, []string{"*.key"}, nil); complete {
+		t.Fatal("scan claims complete")
+	}
+	if _, err := NewPlan(root, config.Defaults(), config.Project{}, ""); err == nil || !strings.Contains(err.Error(), "unmask") {
+		t.Fatalf("plan with too many secrets: %v", err)
+	}
+	if _, err := NewPlan(root, config.Defaults(), config.Project{Unmask: []string{"k*.key"}}, ""); err != nil {
+		t.Fatalf("unmasked fixtures should pass: %v", err)
+	}
+}
+
+// A secret file created after the cage makes it stale, so the next start
+// recreates it with the new mask.
+func TestNewSecretMakesCageStale(t *testing.T) {
+	t.Setenv("ZOO_HOME", t.TempDir())
+	root := t.TempDir()
+	g := config.Defaults()
+	pl, err := NewPlan(root, g, config.Project{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := pl.Spec(g, "", nil)
+	running := backend.Status{Labels: spec.Labels}
+	if Stale(running, spec) {
+		t.Fatal("fresh cage stale")
+	}
+	write(t, filepath.Join(root, ".env"), "SECRET=1")
+	pl2, _ := NewPlan(root, g, config.Project{}, "")
+	if !Stale(running, pl2.Spec(g, "", nil)) {
+		t.Fatal("new .env didn't make the cage stale")
+	}
+	// A cage from before fingerprints is stale only if there's something to hide.
+	old := backend.Status{Labels: map[string]string{LabelImage: g.CageImage}}
+	if !Stale(old, pl2.Spec(g, "", nil)) || Stale(old, spec) {
+		t.Error("pre-fingerprint cages")
 	}
 }

@@ -8,73 +8,13 @@ import (
 	"time"
 )
 
-const fakeBW = `#!/bin/sh
-echo "$@" >> "$FAKE_LOG"
-case " $* " in *" --nointeraction "*) ;; *) echo "missing --nointeraction" >&2; exit 9;; esac
-if [ "$1" = status ]; then
-  if [ -z "$BW_SESSION" ]; then echo '{"status":"locked"}'; else echo '{"status":"unlocked"}'; fi
-  exit 0
-fi
-if [ -z "$BW_SESSION" ]; then echo "Vault is locked." >&2; exit 1; fi
-case "$1 $2 $3" in
-"get item Stripe")
-  cat <<'EOF'
-{"id":"11111111-2222-3333-4444-555555555555","name":"Stripe","notes":"line1\nline2\n",
- "login":{"username":"me@example.com","password":"pw-secret\n","totp":"otpauth://x"},
- "fields":[{"name":"test-key","value":"sk_test_123","type":1},{"name":"Region","value":"eu","type":0}]}
-EOF
-  ;;
-"get item bare")
-  echo '{"id":"x","name":"bare","notes":null,"login":null,"fields":null}' ;;
-"get item dup")
-  printf 'More than one result was found. Try getting a specific object by ` + "`id`" + ` instead. The following objects were found:\naaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\nffffffff-bbbb-cccc-dddd-eeeeeeeeeeee\n' >&2
-  exit 1 ;;
-"get item garbage")
-  echo 'not json' ;;
-"get item sleepy")
-  sleep 5 ;;
-"get totp Stripe")
-  echo 123456 ;;
-"get totp bare")
-  echo "No TOTP available for this login." >&2; exit 1 ;;
-*)
-  echo "Not found." >&2; exit 1 ;;
-esac
-`
-
-const fakeOP = `#!/bin/sh
-echo "$@" >> "$FAKE_LOG"
-if [ -z "$OP_SIGNED_IN" ]; then
-  case "$1" in
-  account) if [ -n "$OP_ACCOUNTS" ]; then echo '[{"url":"my.1password.com"}]'; else echo '[]'; fi; exit 0 ;;
-  esac
-  echo '[ERROR] 2026/10/28 10:00:00 You are not currently signed in. Please run ` + "`op signin --help`" + ` for instructions' >&2
-  exit 1
-fi
-case "$1" in
-whoami) echo "me"; exit 0 ;;
-read)
-  [ "$2" = "--no-newline" ] || { echo "missing --no-newline" >&2; exit 9; }
-  case "$3" in
-  op://Private/Stripe/key) printf 'op-secret\n\n' ;;
-  op://Private/Empty/key) ;;
-  *) echo "[ERROR] 2026/10/28 10:00:00 could not read secret '$3': no item matched" >&2; exit 1 ;;
-  esac ;;
-esac
-`
-
 func setup(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	for name, body := range map[string]string{"bw": fakeBW, "op": fakeOP} {
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
+	bw, op := installFakes(t, dir) // see fakecli_test.go
 	log := filepath.Join(dir, "argv.log")
-	t.Setenv("ZOO_BW_BIN", filepath.Join(dir, "bw"))
-	t.Setenv("ZOO_OP_BIN", filepath.Join(dir, "op"))
+	t.Setenv("ZOO_BW_BIN", bw)
+	t.Setenv("ZOO_OP_BIN", op)
 	t.Setenv("FAKE_LOG", log)
 	t.Setenv("BW_SESSION", "sess")
 	t.Setenv("OP_SIGNED_IN", "1")
@@ -152,10 +92,10 @@ func TestBitwardenMissingCLI(t *testing.T) {
 	t.Setenv("ZOO_BW_BIN", "")
 	t.Setenv("PATH", t.TempDir())
 	_, err := Resolve("bw:Stripe")
-	if err == nil || !strings.Contains(err.Error(), "brew install bitwarden-cli") {
+	if err == nil || !strings.Contains(err.Error(), "install the Bitwarden CLI") {
 		t.Errorf("err = %v", err)
 	}
-	if ok, hint := Available("bw:Stripe"); ok || !strings.Contains(hint, "brew install bitwarden-cli") {
+	if ok, hint := Available("bw:Stripe"); ok || !strings.Contains(hint, "install the Bitwarden CLI") {
 		t.Errorf("Available = %v, %q", ok, hint)
 	}
 }

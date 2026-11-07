@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -43,16 +44,12 @@ type apiState struct {
 // and with ZOO_DOCKER_API=off.
 func (d *Docker) api(ctx context.Context) *dockerapi.Client {
 	d.a.once.Do(func() {
-		if d.name != "docker" || os.Getenv("ZOO_DOCKER_API") == "off" || os.Getenv("ZOO_DOCKER_BIN") != "" {
+		if os.Getenv("ZOO_DOCKER_API") == "off" || os.Getenv("ZOO_DOCKER_BIN") != "" {
 			return
 		}
-		host := os.Getenv("DOCKER_HOST")
+		host := d.apiHost(ctx)
 		if host == "" {
-			out, err := d.cli.Run(ctx, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}")
-			if err != nil {
-				return
-			}
-			host = strings.TrimSpace(out)
+			return
 		}
 		c, err := dockerapi.New(host)
 		if err != nil {
@@ -148,9 +145,16 @@ func (d *Docker) sampleAPI(ctx context.Context, c *dockerapi.Client) ([]backend.
 	return out, nil
 }
 
+// cpuWindow is the shortest interval a CPU rate is computed over.
+const cpuWindow = 500 * time.Millisecond
+
 func (d *Docker) streamStats(ctx context.Context, c *dockerapi.Client, id string) {
+	var r cpuRate
 	_ = c.Stats(ctx, id, func(s dockerapi.StatsJSON) {
 		smp := toSample(id, s)
+		if v, ok := r.add(s.CPUStats.CPUUsage.TotalUsage, time.Now()); ok {
+			smp.CPUPercent, smp.Have["cpu"] = v, true
+		}
 		d.a.statsMu.Lock()
 		if _, live := d.a.streams[id]; live {
 			d.a.latest[id] = smp
@@ -166,11 +170,36 @@ func (d *Docker) streamStats(ctx context.Context, c *dockerapi.Client, id string
 	d.a.statsMu.Unlock()
 }
 
+// cpuRate turns a cumulative CPU-time counter into percent of one core
+// (100% = one busy core, as `docker stats` shows), measured against wall
+// time between our own readings, over windows of at least cpuWindow.
+//
+// Not the engine's own precpu/system_cpu_usage: podman's compatible API
+// sends its first samples microseconds apart and fills system time
+// differently, which gave 0% for a container pegging a core (seen against
+// podman 5.8). Wall time means the same thing on every engine.
+type cpuRate struct {
+	total uint64
+	at    time.Time
+	last  float64
+	have  bool
+}
+
+func (r *cpuRate) add(total uint64, now time.Time) (float64, bool) {
+	switch {
+	case r.at.IsZero() || total < r.total: // first reading, or the counter reset
+		r.total, r.at = total, now
+		return r.last, r.have
+	case now.Sub(r.at) < cpuWindow:
+		return r.last, r.have // too soon for a meaningful rate
+	}
+	r.last = float64(total-r.total) / float64(now.Sub(r.at).Nanoseconds()) * 100
+	r.total, r.at, r.have = total, now, true
+	return r.last, true
+}
+
 func toSample(id string, s dockerapi.StatsJSON) backend.Sample {
 	smp := backend.Sample{ID: id, Have: map[string]bool{"mem": true, "net": true, "blk": true, "pids": true}}
-	if v, ok := s.CPUPercent(); ok {
-		smp.CPUPercent, smp.Have["cpu"] = v, true
-	}
 	smp.MemUsed, smp.MemLimit = s.MemUsed(), float64(s.MemoryStats.Limit)
 	smp.NetRx, smp.NetTx = s.Net()
 	smp.BlkRead, smp.BlkWrite = s.Blk()
@@ -252,4 +281,64 @@ func relevant(e dockerapi.Event) bool {
 		return strings.HasPrefix(name, "zoo")
 	}
 	return false
+}
+
+// apiHost finds the engine's local API address, or "" to stay on the CLI.
+//
+// docker: DOCKER_HOST, else the current context's endpoint.
+// podman: CONTAINER_HOST, else the API service socket. On Linux that's the
+// user's podman.socket (systemctl --user enable --now podman.socket), used
+// only if it exists; on macOS and Windows, the podman machine's forwarded
+// socket or pipe. Podman serves the same compatible API docker does.
+func (d *Docker) apiHost(ctx context.Context) string {
+	switch d.name {
+	case "docker":
+		if h := os.Getenv("DOCKER_HOST"); h != "" {
+			return h
+		}
+		out, err := d.cli.Run(ctx, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}")
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(out)
+	case "podman":
+		if h := os.Getenv("CONTAINER_HOST"); h != "" {
+			return h
+		}
+		if runtime.GOOS == "linux" {
+			out, err := d.cli.Run(ctx, "info", "--format", "{{.Host.RemoteSocket.Path}} {{.Host.RemoteSocket.Exists}}")
+			if err != nil {
+				return ""
+			}
+			path, exists, _ := strings.Cut(strings.TrimSpace(out), " ")
+			if exists != "true" {
+				return ""
+			}
+			return localHost(path)
+		}
+		field := "{{.ConnectionInfo.PodmanSocket.Path}}"
+		if runtime.GOOS == "windows" {
+			field = "{{.ConnectionInfo.PodmanPipe.Path}}"
+		}
+		out, err := d.cli.Run(ctx, "machine", "inspect", "--format", field)
+		if err != nil {
+			return ""
+		}
+		return localHost(strings.TrimSpace(strings.SplitN(out, "\n", 2)[0]))
+	}
+	return ""
+}
+
+// localHost turns a socket path or pipe name into a DOCKER_HOST-style
+// address (paths podman prints may or may not carry a scheme).
+func localHost(p string) string {
+	switch {
+	case p == "" || p == "<no value>":
+		return ""
+	case strings.Contains(p, "://"):
+		return p
+	case strings.HasPrefix(p, `\\.\pipe\`) || strings.HasPrefix(p, "//./pipe/"):
+		return "npipe://" + strings.ReplaceAll(p, `\`, "/")
+	}
+	return "unix://" + p
 }

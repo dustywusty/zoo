@@ -158,6 +158,9 @@ func (p *Proxy) dial(ctx context.Context) (net.Conn, error) {
 	if p.Dial != nil {
 		return p.Dial(ctx)
 	}
+	if isPipe(p.Upstream) {
+		return dialPipe(ctx, p.Upstream)
+	}
 	var d net.Dialer
 	return d.DialContext(ctx, "unix", p.Upstream)
 }
