@@ -52,7 +52,8 @@ Usage:
   zoo ls                         list cages
   zoo stop <cage|all>            stop a cage (the worktree is untouched)
   zoo reset <cage>               delete a cage; next run starts from a clean image
-  zoo allow <host...>            allow hosts for every cage (".example.com" = subdomains too)
+  zoo allow [--for 4h] <host...> allow hosts for every cage (".example.com" = subdomains too);
+                                 --for makes it lapse (30m, 4h, 2d)
   zoo deny <host...>             remove hosts from the allowlist
   zoo allowlist                  print the allowlist
   zoo blocked [cage]             hosts the keeper refused that aren't allowlisted (approve with zoo allow)
@@ -65,7 +66,8 @@ Usage:
   zoo backend [list|use <name>]  show runtimes and their isolation; pick one (apple, docker, podman, auto)
   zoo status                     backend, keeper, daemon, isolation, shims
   zoo service ls                 services cages can be granted (config: services:)
-  zoo grant <cage> <service>     let a cage reach a service (as <service>.zoo)
+  zoo grant [--for 4h] <cage> <service>
+                                 let a cage reach a service (as <service>.zoo), for a while or for good
   zoo revoke <cage> <service>    take it back
   zoo trust [path] [--show]      approve this worktree's zoo.yaml (agents can edit it, so zoo
                                  only uses the copy you approved)
@@ -483,6 +485,7 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 		}
 	}
 	ensureTrust(root)
+	expireTemporary(ctx, e)
 	proj, err := config.LoadProject(root)
 	if err != nil {
 		return cage.Plan{}, "", err
@@ -537,6 +540,20 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 		say("services: %v", err)
 	}
 	return pl, ip, nil
+}
+
+// expireTemporary drops allowlist entries and grants whose time is up, for
+// when the daemon (which normally does it) isn't running.
+func expireTemporary(ctx context.Context, e env) {
+	if removed, err := keeper.Expire(time.Now()); err == nil && len(removed) > 0 {
+		say("temporary allow expired: %s", strings.Join(removed, " "))
+		reloadIfUp(ctx, e)
+	}
+	if gone, err := services.PruneExpired(time.Now()); err == nil {
+		for _, g := range gone {
+			say("temporary grant expired: %s from %s", g[1], g[0])
+		}
+	}
 }
 
 // keeperIPFor is the keeper's address on a network the cage is on.
@@ -948,8 +965,12 @@ func reloadKeeper(g config.Global) {
 }
 
 func cmdAllow(args []string) error {
+	args, forDur, err := takeFor(args)
+	if err != nil {
+		return err
+	}
 	if len(args) == 0 {
-		return errors.New("usage: zoo allow <host...>")
+		return errors.New("usage: zoo allow [--for 4h] <host...>")
 	}
 	g, err := loadCfg()
 	if err != nil {
@@ -958,12 +979,29 @@ func cmdAllow(args []string) error {
 	if err := keeper.EnsureFiles(); err != nil {
 		return err
 	}
+	if forDur > 0 {
+		until := time.Now().Add(forDur)
+		touched, err := keeper.AllowFor(until, args...)
+		if err != nil {
+			return err
+		}
+		reloadKeeper(g)
+		if len(touched) == 0 {
+			say("already allowed for good")
+			return nil
+		}
+		say("allowed %s until %s", strings.Join(touched, " "), config.Until(until))
+		return nil
+	}
 	added, err := keeper.Allow(args...)
 	if err != nil {
 		return err
 	}
+	if err := keeper.MakePermanent(args...); err != nil {
+		return err
+	}
 	if len(added) == 0 {
-		say("already allowed")
+		say("already allowed (now for good, if it was temporary)")
 		return nil
 	}
 	reloadKeeper(g)
@@ -1004,6 +1042,17 @@ func cmdAllowlist() error {
 		return err
 	}
 	os.Stdout.Write(b)
+	if exp := keeper.LoadExpiries(); len(exp) > 0 {
+		hosts := make([]string, 0, len(exp))
+		for h := range exp {
+			hosts = append(hosts, h)
+		}
+		sort.Strings(hosts)
+		fmt.Println("\n# temporary:")
+		for _, h := range hosts {
+			fmt.Printf("#   %s expires %s\n", h, config.Until(exp[h]))
+		}
+	}
 	return nil
 }
 

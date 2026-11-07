@@ -402,6 +402,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Cage    string `json:"cage"`
 		Service string `json:"service"`
+		For     string `json:"for"` // optional: 30m, 4h, 2d
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil || body.Cage == "" || body.Service == "" {
 		http.Error(w, "need {\"cage\": ..., \"service\": ...}", http.StatusBadRequest)
@@ -421,10 +422,23 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown cage or service", http.StatusNotFound)
 		return
 	}
+	var until time.Time
+	if body.For != "" && r.Method == http.MethodPost {
+		d, err := config.ParseFor(body.For)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		until = time.Now().Add(d)
+	}
 	gr := services.LoadGrants()
 	if r.Method == http.MethodPost {
 		gr.Add(c.Name, body.Service)
-	} else if !gr.Remove(c.Name, body.Service) {
+		if err := services.SetGrantExpiry(c.Name, body.Service, until); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else if _ = services.SetGrantExpiry(c.Name, body.Service, time.Time{}); !gr.Remove(c.Name, body.Service) {
 		http.Error(w, body.Cage+" gets "+body.Service+" from its zoo.yaml; remove it there", http.StatusConflict)
 		return
 	}

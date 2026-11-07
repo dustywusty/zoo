@@ -224,7 +224,17 @@ func Deny(hosts ...string) ([]string, error) {
 		}
 		kept = append(kept, l)
 	}
-	return removed, os.WriteFile(paths.Allowlist(), []byte(strings.Join(kept, "\n")+"\n"), 0o644)
+	if err := os.WriteFile(paths.Allowlist(), []byte(strings.Join(kept, "\n")+"\n"), 0o644); err != nil {
+		return removed, err
+	}
+	if len(removed) > 0 {
+		exp := LoadExpiries()
+		for _, h := range removed {
+			delete(exp, h)
+		}
+		return removed, exp.Save()
+	}
+	return removed, nil
 }
 
 func prune(lines []string) []string {

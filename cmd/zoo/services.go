@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/dusty/zoo/internal/cage"
 	"github.com/dusty/zoo/internal/config"
@@ -62,10 +63,14 @@ const serviceExample = `services:
   keys:   { ssh-agent: bitwarden, keys: [github], hosts: [github.com] }
 `
 
-// cmdGrant handles `zoo grant|revoke <cage> <service>`.
+// cmdGrant handles `zoo grant [--for D] <cage> <service>` and `zoo revoke`.
 func cmdGrant(verb string, args []string) error {
-	if len(args) != 2 {
-		return fmt.Errorf("usage: zoo %s <cage> <service>", verb)
+	args, forDur, err := takeFor(args)
+	if err != nil {
+		return err
+	}
+	if len(args) != 2 || (verb == "revoke" && forDur > 0) {
+		return fmt.Errorf("usage: zoo grant [--for 4h] <cage> <service> | zoo revoke <cage> <service>")
 	}
 	g, err := loadCfg()
 	if err != nil {
@@ -83,11 +88,18 @@ func cmdGrant(verb string, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := grantChange(ctx, e, c, args[1], verb == "grant"); err != nil {
+	var until time.Time
+	if forDur > 0 {
+		until = time.Now().Add(forDur)
+	}
+	if err := grantChange(ctx, e, c, args[1], verb == "grant", until); err != nil {
 		return err
 	}
 	if verb == "grant" {
 		say("%s can reach %s as %s:%d", c.Name, args[1], services.HostName(args[1]), services.ListenPort(g.Services[args[1]]))
+		if !until.IsZero() {
+			say("until %s; then it's revoked", config.Until(until))
+		}
 	} else {
 		say("revoked %s from %s", args[1], c.Name)
 	}
@@ -96,11 +108,15 @@ func cmdGrant(verb string, args []string) error {
 
 // grantChange records a grant or revoke and applies it to the keeper and
 // the cage right away.
-func grantChange(ctx context.Context, e env, c cage.Info, service string, on bool) error {
+func grantChange(ctx context.Context, e env, c cage.Info, service string, on bool, until time.Time) error {
 	gr := services.LoadGrants()
 	if on {
 		gr.Add(c.Name, service)
+		if err := services.SetGrantExpiry(c.Name, service, until); err != nil {
+			return err
+		}
 	} else {
+		_ = services.SetGrantExpiry(c.Name, service, time.Time{})
 		if !gr.Remove(c.Name, service) && repoGrants(c.Worktree, service) {
 			return fmt.Errorf("%s gets %s from %s/zoo.yaml; remove it there", c.Name, service, c.Worktree)
 		}
@@ -128,4 +144,31 @@ func repoGrants(worktree, service string) bool {
 		}
 	}
 	return false
+}
+
+// takeFor pulls `--for D` / `--for=D` out of args.
+func takeFor(args []string) ([]string, time.Duration, error) {
+	var out []string
+	var d time.Duration
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		v, ok := strings.CutPrefix(a, "--for=")
+		if a == "--for" {
+			if i+1 >= len(args) {
+				return nil, 0, errors.New("--for needs a duration (30m, 4h, 2d)")
+			}
+			i++
+			v, ok = args[i], true
+		}
+		if !ok {
+			out = append(out, a)
+			continue
+		}
+		pd, err := config.ParseFor(v)
+		if err != nil {
+			return nil, 0, err
+		}
+		d = pd
+	}
+	return out, d, nil
 }

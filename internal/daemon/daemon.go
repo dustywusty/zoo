@@ -25,6 +25,7 @@ import (
 	"github.com/dusty/zoo/internal/config"
 	"github.com/dusty/zoo/internal/keeper"
 	"github.com/dusty/zoo/internal/paths"
+	"github.com/dusty/zoo/internal/services"
 )
 
 //go:embed web/index.html
@@ -226,6 +227,7 @@ func (s *Server) pollStats() {
 }
 
 func (s *Server) refreshAllowlist() {
+	s.expireTemporary()
 	l, err := keeper.ReadAllowlist()
 	if err != nil {
 		return
@@ -233,6 +235,35 @@ func (s *Server) refreshAllowlist() {
 	s.mu.Lock()
 	s.allowlist = l
 	s.mu.Unlock()
+}
+
+// expireTemporary removes `--for` allows and grants whose time is up.
+func (s *Server) expireTemporary() {
+	now := time.Now()
+	if removed, err := keeper.Expire(now); err != nil {
+		log.Printf("expire allows: %v", err)
+	} else if len(removed) > 0 {
+		if err := keeper.Reload(context.Background(), s.backend); err != nil {
+			log.Printf("keeper reload: %v", err)
+		}
+		s.mu.Lock()
+		a := s.newAlert("info", "", "Temporary allow expired", strings.Join(removed, ", ")+" removed from the allowlist.")
+		s.mu.Unlock()
+		s.publish("alert", a)
+	}
+	gone, err := services.PruneExpired(now)
+	if err != nil {
+		log.Printf("expire grants: %v", err)
+	}
+	for _, g := range gone {
+		s.mu.Lock()
+		a := s.newAlert("info", g[0], "Temporary grant expired", g[1]+" revoked from "+g[0]+".")
+		s.mu.Unlock()
+		s.publish("alert", a)
+	}
+	if len(gone) > 0 {
+		go s.pollCages()
+	}
 }
 
 // --- keeper log --------------------------------------------------------------
@@ -441,10 +472,12 @@ func (s *Server) publish(kind string, v any) {
 
 type cageView struct {
 	cage.Info
-	Grants   []string  `json:"grants"`
-	Stat     *Stat     `json:"stat,omitempty"`
-	Counts   Counts    `json:"counts"`
-	Sessions []Session `json:"sessions"`
+	Grants []string `json:"grants"`
+	// GrantExpiry: temporary grants and when they lapse.
+	GrantExpiry map[string]time.Time `json:"grant_expiry,omitempty"`
+	Stat        *Stat                `json:"stat,omitempty"`
+	Counts      Counts               `json:"counts"`
+	Sessions    []Session            `json:"sessions"`
 }
 
 type stateView struct {
@@ -454,8 +487,10 @@ type stateView struct {
 	Cages     []cageView    `json:"cages"`
 	Keeper    any           `json:"keeper"`
 	Allowlist []string      `json:"allowlist"`
-	Error     string        `json:"error,omitempty"`
-	Now       time.Time     `json:"now"`
+	// AllowExpiry: temporary allowlist entries and when they lapse.
+	AllowExpiry map[string]time.Time `json:"allow_expiry"`
+	Error       string               `json:"error,omitempty"`
+	Now         time.Time            `json:"now"`
 }
 
 func (s *Server) snapshot() stateView {
@@ -466,10 +501,11 @@ func (s *Server) snapshot() stateView {
 			"name": s.info.Name, "detail": s.info.Detail, "version": s.info.Version,
 			"isolation": s.info.Caps.Isolation, "floor": s.floor,
 		},
-		Keeper:    map[string]any{"running": s.keeperUp, "ip": s.keeperIP},
-		Allowlist: append([]string(nil), s.allowlist...),
-		Error:     s.lastErr,
-		Now:       time.Now().UTC(),
+		Keeper:      map[string]any{"running": s.keeperUp, "ip": s.keeperIP},
+		Allowlist:   append([]string(nil), s.allowlist...),
+		AllowExpiry: keeper.LoadExpiries(),
+		Error:       s.lastErr,
+		Now:         time.Now().UTC(),
 	}
 	s.svc.mu.Lock()
 	v.Services = append([]ServiceView(nil), s.svc.views...)
@@ -481,6 +517,14 @@ func (s *Server) snapshot() stateView {
 	s.svc.mu.Unlock()
 	for _, c := range s.cages {
 		cv := cageView{Info: c, Grants: grants[c.Name]}
+		for _, g := range cv.Grants {
+			if t := services.GrantExpiry(c.Name, g); !t.IsZero() {
+				if cv.GrantExpiry == nil {
+					cv.GrantExpiry = map[string]time.Time{}
+				}
+				cv.GrantExpiry[g] = t
+			}
+		}
 		if st, ok := s.stats[c.ID]; ok {
 			st := st
 			cv.Stat = &st
@@ -622,12 +666,27 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAllow(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Host string `json:"host"`
+		For  string `json:"for"` // optional: 30m, 4h, 2d
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil || body.Host == "" {
 		http.Error(w, "need {\"host\": ...}", http.StatusBadRequest)
 		return
 	}
-	added, err := keeper.Allow(body.Host)
+	var added []string
+	var err error
+	if body.For != "" {
+		d, perr := config.ParseFor(body.For)
+		if perr != nil {
+			http.Error(w, perr.Error(), http.StatusBadRequest)
+			return
+		}
+		added, err = keeper.AllowFor(time.Now().Add(d), body.Host)
+	} else {
+		added, err = keeper.Allow(body.Host)
+		if err == nil {
+			err = keeper.MakePermanent(body.Host)
+		}
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

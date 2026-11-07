@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dusty/zoo/internal/config"
 	"github.com/dusty/zoo/internal/paths"
@@ -145,12 +146,14 @@ func Names(all map[string]config.Service) []string {
 // Grants maps cage name -> granted service names (explicit `zoo grant`s).
 type Grants map[string][]string
 
+// LoadGrants reads explicit grants, leaving out any whose time is up.
 func LoadGrants() Grants {
 	g := Grants{}
 	b, err := os.ReadFile(paths.Grants())
 	if err == nil {
 		_ = json.Unmarshal(b, &g)
 	}
+	g.dropExpired(time.Now())
 	return g
 }
 

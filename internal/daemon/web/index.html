@@ -113,6 +113,7 @@ h2 { font-size: 13px; font-weight: 600; margin: 0; color: var(--ink); letter-spa
 .grant button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 6px; font-size: 13px; line-height: 20px; border-radius: 5px; }
 .grant button:hover { color: var(--red); }
 .grant.down { color: var(--muted); }
+.grant .ttl, .tag.ttl { font-style: normal; font-size: 10.5px; color: var(--amber); margin-left: 5px; }
 .add-wrap { position: relative; }
 .add { border: 1px dashed var(--line2); background: none; color: var(--muted); cursor: pointer; border-radius: 6px; font-size: 12px; line-height: 18px; padding: 0 8px; }
 .add:hover { color: var(--ink); border-color: var(--muted); }
@@ -441,13 +442,28 @@ function cageMeters(c) {
     meter("Network", have.net ? `↓ ${bytes(st.net_rx_rate)}/s <span class="muted">·</span> ↑ ${bytes(st.net_tx_rate)}/s` : "—", false),
   ];
 }
+// askFor asks how long an approval lasts: "" = for good, null = cancelled.
+function askFor(what) {
+  const v = prompt(`${what}\nFor how long? e.g. 30m, 4h, 2d. Leave empty for good.`, "4h");
+  if (v === null) return null;
+  const d = v.trim();
+  if (d && !/^\d+(\.\d+)?(s|m|h|d)$/i.test(d)) { toast(`"${d}" isn't a duration like 30m, 4h or 2d`, true); return null; }
+  return d;
+}
+function left(t) {
+  const ms = new Date(t) - Date.now();
+  if (ms <= 0) return "expired";
+  const m = Math.round(ms / 60000);
+  return m < 60 ? `${m}m` : m < 2880 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
+}
 function grantsRow(c) {
   if (!Array.isArray(c.grants) || (!services().length && !c.grants.length)) return "";
   const svc = new Map(services().map(s => [s.name, s]));
   const chips = c.grants.map(g => {
     const s = svc.get(g);
     const down = s && s.status && s.status !== "ready";
-    return `<span class="grant${down ? " down" : ""}" title="${esc(s ? `${s.kind} · ${s.target}${down ? " · " + s.status : ""}` : "unknown service")}">${esc(g)}<button data-revoke="${esc(g)}" data-cage="${esc(c.name)}" aria-label="Revoke ${esc(g)}">×</button></span>`;
+    const exp = c.grant_expiry && c.grant_expiry[g];
+    return `<span class="grant${down ? " down" : ""}" title="${esc(s ? `${s.kind} · ${s.target}${down ? " · " + s.status : ""}` : "unknown service")}${exp ? esc(` · until ${new Date(exp).toLocaleString()}`) : ""}">${esc(g)}${exp ? `<i class="ttl">${left(exp)}</i>` : ""}<button data-revoke="${esc(g)}" data-cage="${esc(c.name)}" aria-label="Revoke ${esc(g)}">×</button></span>`;
   }).join("");
   const avail = services().filter(s => !c.grants.includes(s.name));
   const menu = openMenu === c.name ? `<div class="menu" role="menu">${avail.length ? avail.map(s => `<button role="menuitem" data-grant="${esc(s.name)}" data-cage="${esc(c.name)}"><span class="mono">${esc(s.name)}</span><span class="muted">${esc(s.kind)}</span></button>`).join("") : `<div class="none">Every service is granted.</div>`}</div>` : "";
@@ -549,7 +565,7 @@ function renderAlerts() {
   $("al-sec").hidden = !n;
   $("al-count").textContent = n ? String(n) : "";
   const shown = alerts.slice(showAllAlerts ? -100 : -4).reverse();
-  $("alerts").innerHTML = shown.map(a => `<div class="li al"><i class="dot ${a.level === "crit" ? "bad" : "warn"}"></i><span class="t" title="${esc(a.title)}">${esc(a.title)}</span><time title="${esc(a.time)}">${hhmmss(a.time)}</time><span class="b">${a.cage ? esc(a.cage) + " · " : ""}${esc(a.body)}</span></div>`).join("");
+  $("alerts").innerHTML = shown.map(a => `<div class="li al"><i class="dot ${a.level === "crit" ? "bad" : a.level === "info" ? "ok" : "warn"}"></i><span class="t" title="${esc(a.title)}">${esc(a.title)}</span><time title="${esc(a.time)}">${hhmmss(a.time)}</time><span class="b">${a.cage ? esc(a.cage) + " · " : ""}${esc(a.body)}</span></div>`).join("");
   const more = $("al-more");
   more.hidden = n <= 4;
   more.textContent = showAllAlerts ? "Show fewer" : `Show all ${Math.min(n, 100)}`;
@@ -620,7 +636,8 @@ function rowHTML(e, fresh) {
     const path = r.method === "CONNECT" ? "" : (() => { try { const u = new URL(r.url); return u.pathname + u.search; } catch { return ""; } })();
     const onList = listed(e.host);
     // Only flag what matters: first contact, and allowed traffic that isn't on the allowlist .
-    const tags = (r.first_seen ? `<span class="tag new">new</span>` : "") + (!e.denied && !onList ? `<span class="tag unl">not listed</span>` : "");
+    const exp = state && state.allow_expiry && Object.entries(state.allow_expiry).find(([h]) => h.startsWith(".") ? e.host === h.slice(1) || e.host.endsWith(h) : e.host === h);
+    const tags = (r.first_seen ? `<span class="tag new">new</span>` : "") + (!e.denied && !onList ? `<span class="tag unl">not listed</span>` : "") + (onList && exp ? `<span class="tag ttl" title="temporary allow">${left(exp[1])}</span>` : "");
     dest = `${esc(e.host)}${path ? `<span class="p">${esc(path.length > 80 ? path.slice(0, 80) + "…" : path)}</span>` : ""}${tags}`;
     verdict = e.denied ? "denied" : esc(r.status || "ok");
     if (!onList && e.host) act = `<button class="btn sm" data-allow-host="${esc(e.host)}">Allow</button>`;
@@ -744,9 +761,10 @@ document.addEventListener("click", async (ev) => {
   const allow = t.closest("[data-allow-host]");
   if (allow) {
     const host = allow.dataset.allowHost;
-    if (!confirm(`Allow ${host} for every cage?`)) return;
+    const dur = askFor(`Allow ${host} for every cage.`);
+    if (dur === null) return;
     allow.disabled = true;
-    try { await send("POST", "/api/allow", { host }); if (state) state.allowlist = [...arr(state.allowlist), host]; toast(`${host} allowed`); renderRows(); }
+    try { await send("POST", "/api/allow", dur ? { host, for: dur } : { host }); if (state) state.allowlist = [...arr(state.allowlist), host]; toast(`${host} allowed${dur ? " for " + dur : ""}`); renderRows(); }
     catch (e) { toast(e.message, true); allow.disabled = false; }
     return;
   }
@@ -754,8 +772,10 @@ document.addEventListener("click", async (ev) => {
   if (grant) {
     const cage = grant.dataset.cage, service = grant.dataset.grant;
     openMenu = "";
+    const dur = askFor(`Grant ${service} to ${cage}.`);
+    if (dur === null) { renderCages(); return; }
     try {
-      await send("POST", "/api/grants", { cage, service });
+      await send("POST", "/api/grants", dur ? { cage, service, for: dur } : { cage, service });
       const c = cageByName(cage);
       if (c && Array.isArray(c.grants) && !c.grants.includes(service)) c.grants.push(service);
       toast(`${service} granted to ${cage}`);
