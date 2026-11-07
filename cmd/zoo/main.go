@@ -530,6 +530,7 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 		if len(pl.Masks) > 0 {
 			say("hiding %d secret file(s) inside the cage", len(pl.Masks))
 		}
+		warnGitRisks(pl.Root)
 	}
 	syncKeeper(ctx, e)
 	if err := applyServices(ctx, e, pl.Name, pl.ID, ip); err != nil {
@@ -706,6 +707,25 @@ func warnGitTraps(root string) {
 	say("Running git there (or opening it in an editor, or a shell with a git prompt) can run commands the agent chose. Inspect, then delete:")
 	for _, t := range traps {
 		fmt.Fprintf(os.Stderr, "    %s  (%s)\n", t.Path, t.Reason)
+	}
+}
+
+// warnGitRisks lists hooks and config in the repository that run commands
+// when you use git on this machine: things that were there before zoo (a
+// downloaded repo can ship a hook), and paths in the worktree that zoo made
+// read-only in the cage because git would run them.
+func warnGitRisks(root string) {
+	risks := cage.HostGitRisks(root)
+	if len(risks) == 0 {
+		return
+	}
+	say("this repository runs commands when you use git on this machine; check you trust them:")
+	for _, r := range risks {
+		line := fmt.Sprintf("    %s  (%s)", r.Path, r.Reason)
+		if r.Writable != "" {
+			line += "\n      lives in the worktree, so it's read-only inside the cage: " + r.Writable
+		}
+		fmt.Fprintln(os.Stderr, line)
 	}
 }
 
@@ -1263,6 +1283,17 @@ func cmdDoctor(args []string) error {
 		fmt.Println(paint("33", "  ! ") + "git-traps: scan stopped early (too many files)")
 	} else {
 		fmt.Println(paint("32", "  ✓ ") + "git-traps: no planted repositories in the worktree")
+	}
+	if risks := cage.HostGitRisks(pl.Root); len(risks) > 0 {
+		for _, r := range risks {
+			msg := fmt.Sprintf("git-runs: %s (%s)", r.Path, r.Reason)
+			if r.Writable != "" {
+				msg += "; in the worktree, read-only in the cage"
+			}
+			fmt.Println(paint("33", "  ! ") + msg)
+		}
+	} else {
+		fmt.Println(paint("32", "  ✓ ") + "git-runs: no hooks or command-running git config")
 	}
 	if !shims.OnPath() {
 		fmt.Println(paint("33", "  ! ") + "shims: not on PATH, so Conductor/herdr launch agents outside cages (zoo shims install)")

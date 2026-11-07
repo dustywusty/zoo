@@ -187,6 +187,10 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 			}
 		}
 	}
+	// Hooks dirs, included config and filter scripts that git config points
+	// at inside the worktree would run on the host after the agent edits
+	// them (core.hooksPath=.husky is the common case).
+	pl.ReadOnly = append(pl.ReadOnly, WritableGitPaths(root)...)
 	// A directory already mounted (read-only or reopened) can't be renamed
 	// either, and mounting it again rw as a pin would undo the read-only one.
 	mounted := map[string]bool{}
