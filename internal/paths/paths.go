@@ -45,6 +45,12 @@ func InjectDir() string              { return filepath.Join(KeeperEtc(), "inject
 func InjectHosts() string            { return filepath.Join(KeeperEtc(), "inject-hosts.txt") }
 func InjectLog() string              { return filepath.Join(KeeperLog(), "inject.log") }
 
+// Package caches cages keep across `zoo reset` (cache: project | shared).
+func CacheRoot() string               { return filepath.Join(Home(), "cache") }
+func CacheProjects() string           { return filepath.Join(CacheRoot(), "project") }
+func CacheProject(cage string) string { return filepath.Join(CacheProjects(), cage) }
+func CacheShared() string             { return filepath.Join(CacheRoot(), "shared") }
+
 // MaskFile is the empty, read-only file mounted over secrets in cages. It
 // sits alone in its own directory: some runtimes share a single-file mount's
 // whole parent directory with the guest.

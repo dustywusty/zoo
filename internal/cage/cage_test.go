@@ -130,7 +130,8 @@ func TestPlanWorktree(t *testing.T) {
 	if spec.CPUs != 4 || spec.Memory != "4G" || spec.Pids != 2048 || spec.Labels["zoo.backend"] != "fake" || spec.Labels[LabelWorktree] != root {
 		t.Errorf("spec: %+v", spec)
 	}
-	if len(spec.Mounts) != 2 || spec.Mounts[0].Source != root || spec.Mounts[0].Target != root || spec.Mounts[0].ReadOnly {
+	// worktree, main .git, package cache
+	if len(spec.Mounts) != 3 || spec.Mounts[2].Target != CacheTarget || spec.Mounts[0].Source != root || spec.Mounts[0].Target != root || spec.Mounts[0].ReadOnly {
 		t.Errorf("mounts: %+v", spec.Mounts)
 	}
 	if !strings.Contains(strings.Join(spec.Env, " "), "HTTPS_PROXY=http://192.168.64.2:3128") {

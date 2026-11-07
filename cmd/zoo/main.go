@@ -79,6 +79,9 @@ Usage:
   zoo revoke <cage> <service>    take it back
   zoo trust [path] [--show]      approve this worktree's zoo.yaml (agents can edit it, so zoo
                                  only uses the copy you approved)
+  zoo cache ls                   package caches kept across zoo reset, and their sizes
+  zoo cache clear <cage|shared|all>
+                                 delete a cache (not while a cage using it runs)
   zoo version
 
 Global flags (any command):
@@ -153,6 +156,8 @@ func main() {
 		err = cmdGrant(cmd, args)
 	case "trust":
 		err = cmdTrust(args)
+	case "cache", "caches":
+		err = cmdCache(args)
 	case "version", "--version", "-v":
 		fmt.Println("zoo", version)
 	case "help", "--help", "-h":
@@ -557,6 +562,7 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 		if len(pl.Masks) > 0 {
 			say("hiding %d secret file(s) inside the cage", len(pl.Masks))
 		}
+		sayCache(pl)
 		for _, r := range pl.Roots() {
 			warnGitRisks(r)
 		}
@@ -686,6 +692,9 @@ func runIn(o runOpts, cageName string) error {
 			return err
 		}
 		env = append(env, credEnv...)
+	}
+	if st, ok, _ := e.b.Get(ctx, pl.ID); ok {
+		env = append(env, cage.CacheEnv(st.Labels)...)
 	}
 	var missing []string
 	for envName, item := range h.Env {
@@ -997,6 +1006,7 @@ func cmdReset(args []string) error {
 	}
 	syncKeeper(ctx, e)
 	say("reset %s; the next `zoo run` there starts from a clean image", c.Name)
+	noteCacheKept(c.Name)
 	return nil
 }
 

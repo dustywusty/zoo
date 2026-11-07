@@ -54,6 +54,8 @@ type Plan struct {
 	// read-only (git: ro), or an empty directory over one (git: none).
 	ExtraMounts []backend.Mount
 	Git         string // rw | ro | none
+	Cache       string // project | shared | off
+	CacheDir    string // host dir mounted at CacheTarget ("" for off)
 	SizeName    string
 	Size        config.Size
 }
@@ -262,6 +264,14 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 	}
 	pl.Git = mode
 	pl.guardGit(root, mode)
+	if pl.Cache, err = CacheMode(g, p); err != nil {
+		return Plan{}, err
+	}
+	if pl.CacheDir = CacheDir(pl.Cache, name); pl.CacheDir != "" {
+		if err := EnsureCacheDir(pl.CacheDir); err != nil {
+			return Plan{}, fmt.Errorf("package cache: %w", err)
+		}
+	}
 	extra, err := ResolveMounts(root, p.Mounts)
 	if err != nil {
 		return Plan{}, err
@@ -385,6 +395,10 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 		mounts = append(mounts, backend.Mount{Source: p, Target: p})
 	}
 	mounts = append(mounts, pl.ExtraMounts...)
+	mounts = append(mounts, pl.cacheMount()...)
+	if pl.CacheDir != "" {
+		l[LabelCache] = pl.Cache
+	}
 	spec := backend.CageSpec{
 		ID:       pl.ID,
 		Image:    g.CageImage,

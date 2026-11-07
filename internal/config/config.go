@@ -56,6 +56,9 @@ type Global struct {
 	// Git is the default for what cages may do with .git: rw | ro | none.
 	Git string `yaml:"git"`
 
+	// Cache is the default package cache: project | shared | off.
+	Cache string `yaml:"cache"`
+
 	// Credentials stay on the host; cages get a placeholder that the keeper
 	// swaps for the real value on the way to the credential's hosts.
 	Credentials map[string]Credential `yaml:"credentials"`
@@ -116,6 +119,7 @@ type Project struct {
 	Services []string `yaml:"services"` // services and credentials granted to this repo's cage
 	Git      string   `yaml:"git"`      // rw (default) | ro | none
 	Mounts   []string `yaml:"mounts"`   // further worktrees in the same cage (relative to this one, or ~/...)
+	Cache    string   `yaml:"cache"`    // package cache: project (default) | shared | off
 }
 
 func Defaults() Global {
@@ -221,6 +225,9 @@ func merge(g *Global, f Global) {
 	if f.Git != "" {
 		g.Git = f.Git
 	}
+	if f.Cache != "" {
+		g.Cache = f.Cache
+	}
 	if f.Docker.Bin != "" {
 		g.Docker.Bin = f.Docker.Bin
 	}
@@ -288,6 +295,10 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 # unmask: [".env.example", ".env.sample", ".env.template", "*.pub"]
 # git: rw                   # what cages may do with .git: rw (commit; hooks/config read-only),
 #                            # ro (read history only) or none (no .git). zoo.yaml can set it per repo
+# cache: project             # package caches (npm, pnpm, yarn, pip, uv, go, cargo, bun) kept
+#                            # across zoo reset: project (one per cage), shared (one for every cage
+#                            # that picks it: less disk, but a compromised cage can poison packages
+#                            # the others install) or off. zoo.yaml can set it per repo
 # bytes_out_alert: 5242880   # alert when one cage sends this much to one host
 # ntfy_url: https://ntfy.sh/your-private-topic
 # services:                  # things cages can be granted (zoo grant <cage> <service>)
