@@ -4,7 +4,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -184,22 +183,6 @@ func merge(g *Global, f Global) {
 	for k, v := range f.Services {
 		g.Services[k] = v
 	}
-}
-
-// LoadProject reads <root>/zoo.yaml if present.
-func LoadProject(root string) (Project, error) {
-	var p Project
-	b, err := os.ReadFile(filepath.Join(root, "zoo.yaml"))
-	if os.IsNotExist(err) {
-		return p, nil
-	}
-	if err != nil {
-		return p, err
-	}
-	if err := yaml.Unmarshal(b, &p); err != nil {
-		return p, fmt.Errorf("zoo.yaml: %w", err)
-	}
-	return p, nil
 }
 
 // ResolveSize picks a size by name, or parses "cpus:memory" like "3:6G".

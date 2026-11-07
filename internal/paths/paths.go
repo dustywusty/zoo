@@ -37,6 +37,7 @@ func GateToken() string              { return filepath.Join(Home(), "gate-token"
 func GateConf() string               { return filepath.Join(KeeperEtc(), "gate.json") }
 func GateLog() string                { return filepath.Join(KeeperLog(), "gate.log") }
 func ServiceData(name string) string { return filepath.Join(Home(), "services", name) }
+func Trust() string                  { return filepath.Join(Home(), "trust") }
 
 // MaskFile is the empty, read-only file mounted over secrets in cages. It
 // sits alone in its own directory: some runtimes share a single-file mount's

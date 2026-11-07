@@ -67,6 +67,8 @@ Usage:
   zoo service ls                 services cages can be granted (config: services:)
   zoo grant <cage> <service>     let a cage reach a service (as <service>.zoo)
   zoo revoke <cage> <service>    take it back
+  zoo trust [path] [--show]      approve this worktree's zoo.yaml (agents can edit it, so zoo
+                                 only uses the copy you approved)
   zoo version
 
 Global flags (any command):
@@ -131,6 +133,8 @@ func main() {
 		err = cmdService(args)
 	case "grant", "revoke":
 		err = cmdGrant(cmd, args)
+	case "trust":
+		err = cmdTrust(args)
 	case "version", "--version", "-v":
 		fmt.Println("zoo", version)
 	case "help", "--help", "-h":
@@ -478,6 +482,7 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 			return cage.Plan{}, "", fmt.Errorf("refusing to cage %s: run zoo from a project directory", root)
 		}
 	}
+	ensureTrust(root)
 	proj, err := config.LoadProject(root)
 	if err != nil {
 		return cage.Plan{}, "", err
