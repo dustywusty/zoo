@@ -109,6 +109,8 @@ h2 { font-size: 13px; font-weight: 600; margin: 0; color: var(--ink); letter-spa
 .sess { color: var(--ink); }
 .sess + .sess::before { content: "·"; color: var(--muted); margin: 0 6px 0 0; }
 .sess i { font-style: normal; color: var(--muted); margin-left: 4px; }
+.port { font-family: var(--mono); font-size: 11.5px; line-height: 20px; padding: 0 8px; border-radius: 6px; background: var(--raise); color: var(--ink); text-decoration: none; }
+.port:hover { background: var(--accent-soft); }
 .grant { display: inline-flex; align-items: center; font-family: var(--mono); font-size: 11.5px; line-height: 20px; padding: 0 2px 0 8px; border-radius: 6px; background: var(--raise); color: var(--ink); }
 .grant button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 6px; font-size: 13px; line-height: 20px; border-radius: 5px; }
 .grant button:hover { color: var(--red); }
@@ -470,6 +472,15 @@ function grantsRow(c) {
   const add = services().length ? `<span class="add-wrap"><button class="add" data-menu="${esc(c.name)}" aria-haspopup="menu" aria-expanded="${openMenu === c.name}" title="Grant a service">+ grant</button>${menu}</span>` : "";
   return `<div class="kv"><span class="k">Services</span><span class="v">${chips || (avail.length ? "" : `<span class="muted">none</span>`)}${add}</span></div>`;
 }
+function portsRow(c) {
+  const pp = state && state.preview_port, ports = arr(c.ports);
+  if (!c.running || !pp || !ports.length) return "";
+  const links = ports.map(p => {
+    const url = `http://${Number(p)}.${c.name}.localhost:${Number(pp)}`;
+    return `<a class="port" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="${esc(url)}">${Number(p)}</a>`;
+  }).join("");
+  return `<div class="kv"><span class="k">Preview</span><span class="v">${links}</span></div>`;
+}
 function cageShell(c) {
   const cnt = c.counts || {};
   const sessions = arr(c.sessions).map(s => `<span class="sess" title="started ${esc(s.started)}">${esc(s.harness)}<i>${ago(s.started)}</i></span>`).join("");
@@ -483,6 +494,7 @@ function cageShell(c) {
     ${c.running ? `<div class="meters"></div>` : `<div class="stopped-note">${esc(c.status || "stopped")}</div>`}
     <div class="cage-sub">
       ${c.running ? `<div class="kv"><span class="k">Agents</span><span class="v">${sessions || `<span class="muted">none attached</span>`}</span></div>` : ""}
+      ${portsRow(c)}
       ${grantsRow(c)}
       ${c.network ? `<div class="kv"><span class="k">Network</span><span class="v mono">${esc(c.network)}</span></div>` : ""}
     </div>

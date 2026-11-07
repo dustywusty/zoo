@@ -54,7 +54,11 @@
      "github-ssh",
      "ssh-agent"
     ],
-    "network": "zoo-discus"
+    "network": "zoo-discus",
+    "ports": [
+     3000,
+     5173
+    ]
    },
    {
     "name": "web-checkout",
@@ -197,6 +201,7 @@
     "note": "nothing listening on 127.0.0.1:3306"
    }
   ],
+  "preview_port": 7779,
   "now": "2026-10-28T15:00:00.000Z"
  },
  "events": [

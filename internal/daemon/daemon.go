@@ -91,6 +91,7 @@ type Server struct {
 	subs      map[chan []byte]struct{}
 	lastErr   string
 	svc       *svcState
+	prev      *previewState
 }
 
 // Token returns the dashboard token, creating it on first use.
@@ -119,6 +120,7 @@ func New(cfg config.Global, b backend.Backend, floor backend.Isolation) (*Server
 		alerted: map[string]time.Time{}, sessions: map[string]Session{},
 		subs: map[chan []byte]struct{}{},
 		svc:  newSvcState(),
+		prev: newPreviewState(),
 	}, nil
 }
 
@@ -143,6 +145,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.tail(ctx, start)
 	go s.tailGate(ctx)
 	go s.runBridge(ctx)
+	go s.runPreview(ctx)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.cfg.Port)
 	ln, err := net.Listen("tcp", addr)
@@ -482,6 +485,7 @@ type cageView struct {
 	Stat        *Stat                `json:"stat,omitempty"`
 	Counts      Counts               `json:"counts"`
 	Sessions    []Session            `json:"sessions"`
+	Ports       []int                `json:"ports,omitempty"` // listening in the cage (preview.go)
 }
 
 type stateView struct {
@@ -495,6 +499,7 @@ type stateView struct {
 	AllowExpiry map[string]time.Time `json:"allow_expiry"`
 	Error       string               `json:"error,omitempty"`
 	Now         time.Time            `json:"now"`
+	PreviewPort int                  `json:"preview_port"` // 0 = preview URLs off
 }
 
 func (s *Server) snapshot() stateView {
@@ -510,6 +515,7 @@ func (s *Server) snapshot() stateView {
 		AllowExpiry: keeper.LoadExpiries(),
 		Error:       s.lastErr,
 		Now:         time.Now().UTC(),
+		PreviewPort: PreviewPort(s.cfg),
 	}
 	s.svc.mu.Lock()
 	v.Services = append([]ServiceView(nil), s.svc.views...)
@@ -520,7 +526,7 @@ func (s *Server) snapshot() stateView {
 	grants := s.svc.grants
 	s.svc.mu.Unlock()
 	for _, c := range s.cages {
-		cv := cageView{Info: c, Grants: grants[c.Name]}
+		cv := cageView{Info: c, Grants: grants[c.Name], Ports: s.prev.portsFor(c.ID)}
 		for _, g := range cv.Grants {
 			if t := services.GrantExpiry(c.Name, g); !t.IsZero() {
 				if cv.GrantExpiry == nil {

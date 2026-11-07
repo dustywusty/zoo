@@ -31,6 +31,7 @@ type Harness struct {
 // Global is ~/.zoo/config.yaml.
 type Global struct {
 	Port          int                `yaml:"port"`
+	PreviewPort   *int               `yaml:"preview_port"` // nil = Port+2; 0 disables
 	DefaultSize   string             `yaml:"default_size"`
 	Sizes         map[string]Size    `yaml:"sizes"`
 	Masks         []string           `yaml:"masks"`
@@ -172,6 +173,9 @@ func merge(g *Global, f Global) {
 	if f.Port != 0 {
 		g.Port = f.Port
 	}
+	if f.PreviewPort != nil {
+		g.PreviewPort = f.PreviewPort
+	}
 	if f.DefaultSize != "" {
 		g.DefaultSize = f.DefaultSize
 	}
@@ -273,6 +277,7 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 #                            # "container" (shared kernel): set "container" to allow it
 # docker: { bin: docker, runtime: "" }   # runtime: runsc (gVisor) or kata for stronger isolation
 # port: 7777                 # dashboard, bound to 127.0.0.1 only
+# preview_port: 7779         # dev-server previews at http://<cage>.localhost:7779 (0 = off)
 # default_size: small
 # sizes:
 #   tiny:   { cpus: 1, memory: 1G, pids: 512 }

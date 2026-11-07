@@ -68,6 +68,8 @@ Usage:
                                  for reachable private addresses (other cages, LAN, metadata);
                                  --json prints one {verdict,check,detail} object per line
   zoo dash                       open the dashboard
+  zoo ports [cage]               dev servers listening in a cage, with their preview URLs
+  zoo open [cage] [port]         open a cage's dev server in the browser (http://<cage>.localhost:7779)
   zoo build [cage|keeper]        (re)build images
   zoo backend [list|use <name>]  show runtimes and their isolation; pick one (apple, docker, podman, auto)
   zoo status                     backend, keeper, daemon, isolation, shims
@@ -133,6 +135,10 @@ func main() {
 		err = cmdDoctor(args)
 	case "dash", "dashboard":
 		err = cmdDash()
+	case "ports":
+		err = cmdPorts(args)
+	case "open":
+		err = cmdOpen(args)
 	case "build":
 		err = cmdBuild(args)
 	case "daemon":
