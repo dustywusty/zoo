@@ -75,12 +75,16 @@ func Sync(ctx context.Context, b backend.Backend, g config.Global, cages []cage.
 	}
 	grants := GrantsFor(g, cages)
 	wanted := map[string]bool{}
+	var keeperIPs map[string]string
+	if k, ok, _ := b.Get(ctx, backend.KeeperID); ok {
+		keeperIPs = k.IPs
+	}
 	var refs []CageRef
 	for _, c := range cages {
 		if !c.Running {
 			continue
 		}
-		refs = append(refs, CageRef{Name: c.Name, IP: c.IP, Grants: grants[c.Name]})
+		refs = append(refs, CageRef{Name: c.Name, IP: c.IP, Grants: grants[c.Name], Via: keeperIPs[c.Network]})
 		for _, s := range grants[c.Name] {
 			wanted[s] = true
 		}

@@ -290,6 +290,15 @@ var behaviors = []behavior{
 				break
 			}
 		}
+		// Docker/podman: the kernel drops forged cage source addresses
+		// (reverse-path filtering) before the gate sees them.
+		if h.tg.perCage {
+			for _, want := range []string{"net.ipv4.conf.all.rp_filter=1", "net.ipv4.conf.default.rp_filter=1"} {
+				if !containsStr(k.Sysctls, want) {
+					t.Errorf("keeper sysctls = %v, missing %s", k.Sysctls, want)
+				}
+			}
+		}
 		// Idempotent: a second call reuses the running keeper.
 		ip2, err := h.b.EnsureKeeper(h.ctx, h.keeper)
 		if err != nil || ip2 != ip {

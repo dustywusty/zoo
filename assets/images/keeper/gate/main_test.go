@@ -112,9 +112,25 @@ func TestGate(t *testing.T) {
 	if _, ok := g.listeners[otherPort]; ok {
 		t.Error("removed service still listening")
 	}
+	// Anti-spoofing: a granted source IP is only accepted on the keeper
+	// address its own network uses.
+	right, wrong := freePort(t), freePort(t)
+	target := greeter(t, "VIA-OK")
+	g.apply(&config{Token: "tok", Services: []service{
+		{Name: "right", Listen: right, Kind: "remote", Target: target,
+			Allow: map[string]string{"127.0.0.1": "api-1"}, Via: map[string]string{"127.0.0.1": "127.0.0.1"}},
+		{Name: "wrong", Listen: wrong, Kind: "remote", Target: target,
+			Allow: map[string]string{"127.0.0.1": "api-1"}, Via: map[string]string{"127.0.0.1": "10.9.9.9"}},
+	}})
+	if got := dialRead(t, right); got != "VIA-OK" {
+		t.Errorf("connection on the expected keeper address refused: %q", got)
+	}
+	if got := dialRead(t, wrong); got != "" {
+		t.Errorf("connection on the wrong keeper address got through: %q", got)
+	}
 	time.Sleep(50 * time.Millisecond)
 	log := logs.String()
-	for _, want := range []string{`"verdict":"allowed"`, `"reason":"no grant"`, `"cage":"api-1"`} {
+	for _, want := range []string{`"verdict":"allowed"`, `"reason":"no grant"`, `"cage":"api-1"`, `"reason":"arrived on the wrong network"`, `"via":"127.0.0.1"`} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log missing %s:\n%s", want, log)
 		}

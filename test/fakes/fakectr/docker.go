@@ -440,7 +440,7 @@ func (f *fake) dockerRun(cmd string, args []string) error {
 	p, pos, err := parse(cmd, defs("-d,--detach", "--name=", "--net,--network=", "--dns=", "--cpus=", "-m,--memory=",
 		"--pids-limit=", "--cap-drop=", "--cap-add=", "--security-opt=", "--restart=", "--runtime=", "-l,--label=",
 		"-e,--env=", "--env-file=", "--mount=", "-v,--volume=", "--read-only", "--tmpfs=", "-u,--user=", "-w,--workdir=",
-		"--rm", "--init", "--entrypoint=", "--hostname=", "--add-host="), args, true)
+		"--rm", "--init", "--entrypoint=", "--hostname=", "--add-host=", "--sysctl="), args, true)
 	if err != nil {
 		return err
 	}
@@ -516,6 +516,24 @@ func (f *fake) dockerRun(cmd string, args []string) error {
 			return fmt.Errorf("docker: Error response from daemon: invalid --security-opt: %q", so)
 		}
 	}
+	// Docker only accepts namespaced sysctls: net.* (not with the host's
+	// network namespace) and the IPC ones.
+	for _, sc := range p["sysctl"] {
+		k, v, ok := strings.Cut(sc, "=")
+		if !ok || k == "" || v == "" {
+			return usagef("invalid argument %q for \"--sysctl\" flag: sysctl must be key=value", sc)
+		}
+		switch {
+		case strings.HasPrefix(k, "net."):
+			if p.last("network") == "host" {
+				return fmt.Errorf("docker: Error response from daemon: sysctl %q not allowed in host network namespace", k)
+			}
+		case strings.HasPrefix(k, "kernel.shm"), strings.HasPrefix(k, "kernel.msg"), k == "kernel.sem", strings.HasPrefix(k, "fs.mqueue."):
+		default:
+			return fmt.Errorf("docker: Error response from daemon: sysctl %q is not allowed", k)
+		}
+	}
+	c.Sysctls = p["sysctl"]
 	if r := p.last("restart"); r != "" {
 		base, _, _ := strings.Cut(r, ":")
 		if !containsStr([]string{"no", "always", "unless-stopped", "on-failure"}, base) {

@@ -217,6 +217,10 @@ type GateService struct {
 	Kind   string            `json:"kind"`
 	Target string            `json:"target"` // host:port the gate dials (bridge kinds: the service name)
 	Allow  map[string]string `json:"allow"`  // cage IP -> cage name
+	// Via is cage IP -> the keeper address that cage dials. The gate refuses
+	// a connection from that IP arriving on another keeper address (a forged
+	// source from another cage's network). Absent entries aren't checked.
+	Via map[string]string `json:"via,omitempty"`
 }
 
 // GateConfig is /etc/zoo/gate.json, read by zoo-gate in the keeper.
@@ -231,6 +235,7 @@ type CageRef struct {
 	Name   string
 	IP     string
 	Grants []string
+	Via    string // the keeper's address on the cage's network ("" = unknown, not checked)
 }
 
 // BuildGate renders the gate config. sidecarIP resolves a sidecar's address.
@@ -256,6 +261,12 @@ func BuildGate(all map[string]config.Service, cages []CageRef, token, bridge str
 			for _, g := range c.Grants {
 				if g == name {
 					gs.Allow[c.IP] = c.Name
+					if c.Via != "" {
+						if gs.Via == nil {
+							gs.Via = map[string]string{}
+						}
+						gs.Via[c.IP] = c.Via
+					}
 				}
 			}
 		}

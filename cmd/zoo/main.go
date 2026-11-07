@@ -61,7 +61,10 @@ Usage:
   zoo keys set|rm <name>         store a credential in the Keychain (e.g. "claude", "codex")
   zoo keys ls                    which harness credentials are stored
   zoo shims install|uninstall    put claude/codex/... shims on PATH so other tools land in cages
-  zoo doctor [cage]              prove the walls hold from inside a cage
+  zoo doctor [--deep] [--json] [cage]
+                                 prove the walls hold from inside a cage; --deep also probes
+                                 for reachable private addresses (other cages, LAN, metadata);
+                                 --json prints one {verdict,check,detail} object per line
   zoo dash                       open the dashboard
   zoo build [cage|keeper]        (re)build images
   zoo backend [list|use <name>]  show runtimes and their isolation; pick one (apple, docker, podman, auto)
@@ -1289,90 +1292,71 @@ func cmdShims(args []string) error {
 // --- doctor -----------------------------------------------------------------------
 
 func cmdDoctor(args []string) error {
-	g, err := loadCfg()
+	opts, err := parseDoctorArgs(args)
 	if err != nil {
 		return err
 	}
-	name := ""
-	if len(args) > 0 {
-		name = args[0]
+	g, err := loadCfg()
+	if err != nil {
+		return err
 	}
 	ctx := context.Background()
 	e, err := resolve(ctx, g)
 	if err != nil {
 		return err
 	}
-	pl, ip, err := prepare(ctx, e, name, "")
+	pl, ip, err := prepare(ctx, e, opts.cage, "")
 	if err != nil {
 		return err
+	}
+	env := []string{
+		"ZOO_MASKS=" + strings.Join(pl.Masks, "\n"),
+		"ZOO_READONLY=" + strings.Join(pl.ReadOnly, "\n"),
+		"ZOO_PIN=" + strings.Join(pl.Pin, "\n"),
+		"ZOO_GIT=" + pl.Git,
+		"ZOO_KEEPER=" + ip,
+		"ZOO_DASH_PORT=" + strconv.Itoa(g.Port),
+		"ZOO_HOST_GATEWAY_EXPECTED=" + strconv.FormatBool(e.info.Caps.HostGatewayReachable),
+		"ZOO_PER_CAGE_NETWORK=" + strconv.FormatBool(e.info.Caps.PerCageNetworks),
+		"HOME=/home/agent",
+	}
+	if opts.deep {
+		env = append(env, "ZOO_DEEP=1")
 	}
 	var outb bytes.Buffer
 	code, runErr := e.b.Exec(ctx, backend.ExecSpec{
 		ID: pl.ID, User: "agent", Workdir: pl.Root, NoStdin: true,
-		Cmd: []string{"/usr/local/bin/zoo-doctor"},
-		Env: append([]string{
-			"ZOO_MASKS=" + strings.Join(pl.Masks, "\n"),
-			"ZOO_READONLY=" + strings.Join(pl.ReadOnly, "\n"),
-			"ZOO_PIN=" + strings.Join(pl.Pin, "\n"),
-			"ZOO_GIT=" + pl.Git,
-			"ZOO_KEEPER=" + ip,
-			"ZOO_DASH_PORT=" + strconv.Itoa(g.Port),
-			"ZOO_HOST_GATEWAY_EXPECTED=" + strconv.FormatBool(e.info.Caps.HostGatewayReachable),
-			"HOME=/home/agent",
-		}, cage.ProxyEnv(ip)...),
+		Cmd:    []string{"/usr/local/bin/zoo-doctor"},
+		Env:    append(env, cage.ProxyEnv(ip)...),
 		Stdout: &outb, Stderr: &outb,
 	})
 	out := outb.String()
 	if runErr == nil && code != 0 && out == "" {
 		runErr = fmt.Errorf("zoo-doctor exited %d", code)
 	}
+	if runErr != nil && out == "" {
+		return runErr
+	}
 
-	fmt.Printf("zoo doctor · cage %s · %s\n", pl.Name, pl.Root)
-	fmt.Printf("backend %s · isolation %s%s\n\n", e.b.Name(), e.info.Caps.Isolation, detailSuffix(e.info))
-	fails := 0
-	color := isTerminal(os.Stdout)
-	paint := func(code, s string) string {
-		if !color {
-			return s
-		}
-		return "\033[" + code + "m" + s + "\033[0m"
-	}
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if line == "" {
-			continue
-		}
-		verdict, rest, _ := strings.Cut(line, " ")
-		switch verdict {
-		case "PASS":
-			fmt.Println(paint("32", "  ✓ ") + rest)
-		case "FAIL":
-			fails++
-			fmt.Println(paint("31", "  ✗ ") + rest)
-		case "WARN":
-			fmt.Println(paint("33", "  ! ") + rest)
-		default:
-			fmt.Println("    " + line)
-		}
-	}
+	checks := parseDoctorOutput(out)
 	// Host-side checks.
 	if !e.info.Caps.Isolation.AtLeast(e.floor) {
-		fmt.Println(paint("33", "  ! ") + fmt.Sprintf("isolation: %s is below your floor (%s)", e.info.Caps.Isolation, e.floor))
+		checks = append(checks, doctorCheck{"WARN", "isolation", fmt.Sprintf("%s is below your floor (%s)", e.info.Caps.Isolation, e.floor)})
 	} else {
-		fmt.Println(paint("32", "  ✓ ") + fmt.Sprintf("isolation: %s (floor %s)", e.info.Caps.Isolation, e.floor))
+		checks = append(checks, doctorCheck{"PASS", "isolation", fmt.Sprintf("%s (floor %s)", e.info.Caps.Isolation, e.floor)})
 	}
 	if g.Port > 0 {
-		fmt.Println(paint("32", "  ✓ ") + fmt.Sprintf("dashboard: bound to 127.0.0.1:%d only", g.Port))
+		checks = append(checks, doctorCheck{"PASS", "dashboard", fmt.Sprintf("bound to 127.0.0.1:%d only", g.Port)})
 	}
 	for _, root := range pl.Roots() {
 		if traps, complete := cage.GitTraps(root); len(traps) > 0 {
-			fails++
 			for _, t := range traps {
-				fmt.Println(paint("31", "  ✗ ") + fmt.Sprintf("git-traps: %s (%s); delete it before running git there", t.Path, t.Reason))
+				checks = append(checks, doctorCheck{"FAIL", "git-traps", fmt.Sprintf("%s (%s); delete it before running git there", t.Path, t.Reason)})
 			}
 		} else if !complete {
-			fmt.Println(paint("33", "  ! ") + "git-traps: scan stopped early in " + root + " (too many files)")
+			checks = append(checks, doctorCheck{"WARN", "git-traps", "scan stopped early in " + root + " (too many files)"})
 		} else {
-			fmt.Println(paint("32", "  ✓ ") + "git-traps: no planted repositories in " + root)
+			checks = append(checks, doctorCheck{"PASS", "git-traps", "no planted repositories in " + root})
 		}
 	}
 	var risks []cage.GitRisk
@@ -1381,25 +1365,40 @@ func cmdDoctor(args []string) error {
 	}
 	if len(risks) > 0 {
 		for _, r := range risks {
-			msg := fmt.Sprintf("git-runs: %s (%s)", r.Path, r.Reason)
+			msg := fmt.Sprintf("%s (%s)", r.Path, r.Reason)
 			if r.Writable != "" {
 				msg += "; in the worktree, read-only in the cage"
 			}
-			fmt.Println(paint("33", "  ! ") + msg)
+			checks = append(checks, doctorCheck{"WARN", "git-runs", msg})
 		}
 	} else {
-		fmt.Println(paint("32", "  ✓ ") + "git-runs: no hooks or command-running git config")
+		checks = append(checks, doctorCheck{"PASS", "git-runs", "no hooks or command-running git config"})
 	}
 	if !shims.OnPath() {
-		fmt.Println(paint("33", "  ! ") + "shims: not on PATH, so Conductor/herdr launch agents outside cages (zoo shims install)")
+		checks = append(checks, doctorCheck{"WARN", "shims", "not on PATH, so Conductor/herdr launch agents outside cages (zoo shims install)"})
 	}
-	if runErr != nil && out == "" {
-		return runErr
+
+	fails := 0
+	for _, c := range checks {
+		if c.Verdict == "FAIL" {
+			fails++
+		}
+	}
+	if opts.json {
+		if err := writeDoctorJSON(os.Stdout, checks); err != nil {
+			return err
+		}
+	} else {
+		fmt.Printf("zoo doctor · cage %s · %s\n", pl.Name, pl.Root)
+		fmt.Printf("backend %s · isolation %s%s%s\n\n", e.b.Name(), e.info.Caps.Isolation, detailSuffix(e.info), map[bool]string{true: " · deep", false: ""}[opts.deep])
+		writeDoctorText(os.Stdout, checks, isTerminal(os.Stdout))
 	}
 	if fails > 0 {
 		return fmt.Errorf("%d check(s) failed", fails)
 	}
-	fmt.Println("\nall walls hold.")
+	if !opts.json {
+		fmt.Println("\nall walls hold.")
+	}
 	return nil
 }
 

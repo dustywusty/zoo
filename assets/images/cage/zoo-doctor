@@ -200,3 +200,162 @@ for h in $gw ${ZOO_KEEPER:-}; do
   if timeout 1 bash -c "</dev/tcp/$h/$port" 2>/dev/null; then hit="$hit $h"; fi
 done
 if [ -n "$hit" ]; then fail "dashboard" "port $port reachable at$hit"; else pass "dashboard" "port $port unreachable"; fi
+
+# 12. Interfaces: only loopback and the cage's own network interface(s). A VPN
+# interface (WireGuard, Tailscale, ZeroTier, tun/tap) inside a cage would
+# route around the keeper.
+ifaces=""; extra=""
+for d in /sys/class/net/*/; do
+  d=${d%/}; n=${d##*/}
+  [ -d "$d" ] || continue
+  flags=$(cat "$d/flags" 2>/dev/null || echo 0)
+  up=$(( flags & 1 ))
+  case "$n" in
+    lo) continue ;;
+    tunl0|sit0|ip6tnl0|gre0|gretap0|erspan0|ip_vti0|ip6_vti0|ip6gre0|ip6gretap0)
+      # Fallback devices the kernel puts in every namespace when tunnel
+      # modules are loaded (Docker Desktop does). Harmless while down, and
+      # bringing one up needs CAP_NET_ADMIN.
+      [ "$up" -ne 0 ] && extra="$extra $n(up)"
+      continue ;;
+    tun*|tap*|wg*|tailscale*|utun*|zt*|ppp*|ipsec*|nordlynx*)
+      extra="$extra $n(vpn)"; continue ;;
+    eth*|en*)
+      if [ "$(cat "$d/type" 2>/dev/null)" = 1 ]; then ifaces="$ifaces $n"; continue; fi ;;
+  esac
+  if [ "$up" -ne 0 ]; then extra="$extra $n"; else extra="$extra $n(down)"; fi
+done
+if [ -n "$extra" ]; then
+  fail "interfaces" "unexpected interface(s):$extra (a VPN or extra link would route around the keeper)"
+elif [ -z "$ifaces" ]; then
+  warn "interfaces" "no network interface besides lo"
+else
+  pass "interfaces" "lo +$ifaces only"
+fi
+
+# 13. Routes: cages are on internal networks, so there should be no default
+# route (Docker's internal networks without a host address have none). Apple
+# gives its internal networks a gateway it can't isolate (apple/container#1320).
+defroute=""
+while read -r iface dest _gw rflags _rest; do
+  [ "$dest" = "00000000" ] || continue
+  [ $(( 0x$rflags & 1 )) -ne 0 ] || continue   # RTF_UP
+  defroute="$defroute $iface"
+done < <(tail -n +2 /proc/net/route 2>/dev/null)
+if [ -r /proc/net/ipv6_route ]; then
+  while read -r dst plen _src _slen _nh _metric _ref _use rflags iface; do
+    [ "$dst" = "00000000000000000000000000000000" ] && [ "$plen" = "00" ] || continue
+    [ "$iface" = "lo" ] && continue
+    [ $(( 0x$rflags & 0x200 )) -eq 0 ] || continue   # RTF_REJECT: not a route out
+    defroute="$defroute $iface(v6)"
+  done < /proc/net/ipv6_route
+fi
+if [ -z "$defroute" ]; then
+  pass "routes" "no default route"
+elif [ "${ZOO_HOST_GATEWAY_EXPECTED:-true}" = "true" ]; then
+  warn "routes" "default route via$defroute (expected on this backend: the network is internal, so it leads only to the host gateway)"
+else
+  fail "routes" "default route via$defroute on a backend whose cage networks have no gateway"
+fi
+
+# 14. Deep (zoo doctor --deep): probe, without the keeper, that nothing
+# private answers (other cages on this /24, well-known LAN, tailnet and cloud
+# metadata addresses), then that the keeper refuses them too. The keeper and
+# its gate ports are expected to answer and aren't probed; the gateway is
+# covered by host-exposure.
+if [ "${ZOO_DEEP:-}" = "1" ]; then
+  self_ips=" $(hostname -I 2>/dev/null) "
+  self4=""
+  for a in $self_ips; do
+    case "$a" in *.*.*.*) self4=$a; break ;; esac
+  done
+  skip_host() { [ "$1" = "${ZOO_KEEPER:-}" ] || [ "${self_ips#* "$1" }" != "$self_ips" ]; }
+
+  # Keeper probes run in the background while the direct scan runs.
+  tmp=$(mktemp -d)
+  i=0
+  if [ -n "${HTTPS_PROXY:-}" ]; then
+    for url in http://169.254.169.254/ http://127.0.0.1:7777/ 'http://[::1]/' http://10.0.0.1/ https://host.docker.internal/ http://metadata.google.internal/; do
+      i=$((i+1))
+      (
+        res=$(env -u NO_PROXY -u no_proxy curl --proxy "$HTTPS_PROXY" -sS -m 6 -o /dev/null -w '%{http_code} %{http_connect}' "$url" 2>/dev/null)
+        printf '%s %s\n' "$url" "${res:-000 000}"
+      ) > "$tmp/k$i" &
+    done
+  fi
+
+  # Direct probes, one line per host: "<label> <host> <port,port,...>". One
+  # bash per host, all its ports at once, killed after 0.8 s; 32 hosts at a
+  # time (24 under a tight pid limit).
+  probes=""
+  if [ -n "$self4" ]; then
+    net=${self4%.*}
+    for o in $(seq 1 254); do
+      h="$net.$o"
+      skip_host "$h" && continue
+      [ "$h" = "${gw:-}" ] && continue
+      probes="$probes"$'\n'"lateral $h 22,80,443,3000,5173,8080"
+    done
+  fi
+  for h in 169.254.169.254 100.100.100.100 192.168.0.1 192.168.1.1 10.0.0.1 172.17.0.1; do
+    skip_host "$h" && continue
+    probes="$probes"$'\n'"private $h 22,53,80,443,8080"
+  done
+  par=32
+  pmax=$(cat /sys/fs/cgroup/pids.max 2>/dev/null || echo max)
+  if [ "$pmax" != "max" ] && [ "$pmax" -lt 1024 ] 2>/dev/null; then par=24; fi
+  # shellcheck disable=SC2016 # expanded by the inner bash
+  hits=$(printf '%s\n' "$probes" | grep -v '^$' | xargs -P "$par" -L 1 timeout 0.8 bash -c '
+    for p in ${3//,/ }; do
+      { : <"/dev/tcp/$2/$p" && echo "$1 $2:$p"; } 2>/dev/null &
+    done
+    wait' _ 2>/dev/null)
+
+  lat=$(printf '%s\n' "$hits" | awk '$1=="lateral"{printf " %s", $2}')
+  priv=$(printf '%s\n' "$hits" | awk '$1=="private"{printf " %s", $2}')
+  if [ -z "$self4" ]; then
+    warn "lateral" "no IPv4 address on this cage; neighbours not scanned"
+  elif [ -n "$lat" ]; then
+    if [ "${ZOO_PER_CAGE_NETWORK:-true}" = "true" ]; then
+      fail "lateral" "other hosts answer directly on ${self4%.*}.0/24:$lat"
+    else
+      warn "lateral" "other cages answer on the shared cage network:$lat (this backend can't give each cage its own network)"
+    fi
+  else
+    pass "lateral" "nothing else on ${self4%.*}.0/24 answers on 22 80 443 3000 5173 8080"
+  fi
+  if [ -n "$priv" ]; then
+    fail "private-direct" "reachable without the keeper:$priv"
+  else
+    pass "private-direct" "metadata, tailnet and LAN addresses unreachable"
+  fi
+
+  wait
+  if [ -z "${HTTPS_PROXY:-}" ]; then
+    fail "private-keeper" "HTTPS_PROXY is not set"
+  else
+    leaked=""; odd=""
+    for f in "$tmp"/k*; do
+      [ -s "$f" ] || continue
+      read -r url code connect < "$f"
+      # Refused: a keeper 403 (plain HTTP, or on CONNECT for https) or no
+      # connection at all.
+      if [ "$code" = "403" ] || [ "$connect" = "403" ] || { [ "$code" = "000" ] && [ "$connect" = "000" ]; }; then
+        continue
+      fi
+      case "$code" in
+        000) leaked="$leaked $url(CONNECT $connect)" ;;   # tunnel opened
+        4*) odd="$odd $url(HTTP $code)" ;;
+        *) leaked="$leaked $url(HTTP $code)" ;;
+      esac
+    done
+    if [ -n "$leaked" ]; then
+      fail "private-keeper" "the keeper forwarded:$leaked"
+    elif [ -n "$odd" ]; then
+      warn "private-keeper" "refused, but not with a keeper 403:$odd"
+    else
+      pass "private-keeper" "metadata, loopback, LAN and host names refused by the keeper"
+    fi
+  fi
+  rm -rf "$tmp"
+fi
