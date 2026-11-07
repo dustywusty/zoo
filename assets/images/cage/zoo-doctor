@@ -244,7 +244,7 @@ while read -r iface dest _gw rflags _rest; do
 done < <(tail -n +2 /proc/net/route 2>/dev/null)
 if [ -r /proc/net/ipv6_route ]; then
   while read -r dst plen _src _slen _nh _metric _ref _use rflags iface; do
-    [ "$dst" = "00000000000000000000000000000000" ] && [ "$plen" = "00" ] || continue
+    if [ "$dst" != "00000000000000000000000000000000" ] || [ "$plen" != "00" ]; then continue; fi
     [ "$iface" = "lo" ] && continue
     [ $(( 0x$rflags & 0x200 )) -eq 0 ] || continue   # RTF_REJECT: not a route out
     defroute="$defroute $iface(v6)"

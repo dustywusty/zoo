@@ -39,12 +39,19 @@ type seen struct {
 type harness struct {
 	in     *injector
 	client *http.Client
+	addr   string // the injector, as squid would dial it
+	caFile string // the test CA, for clients other than h.client
 	mu     sync.Mutex
 	got    []seen
 	log    bytes.Buffer
 }
 
 func newHarness(t *testing.T, rules []injectRule, secrets map[string]string) *harness {
+	return newHarnessWith(t, rules, secrets, nil)
+}
+
+// newHarnessWith uses upstream as the real server when it's non-nil.
+func newHarnessWith(t *testing.T, rules []injectRule, secrets map[string]string, upstream http.Handler) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -62,7 +69,7 @@ func newHarness(t *testing.T, rules []injectRule, secrets map[string]string) *ha
 	conf, _ := json.Marshal(injectConfig{CACert: filepath.Join(dir, "ca.pem"), CAKey: filepath.Join(dir, "ca.key"), Rules: rules})
 	_ = os.WriteFile(filepath.Join(dir, "inject.json"), conf, 0o644)
 
-	h := &harness{}
+	h := &harness{caFile: filepath.Join(dir, "ca.pem")}
 	h.in = newInjector(func(p string) (string, string, bool) {
 		if v, ok := secrets[p]; ok {
 			return v, "", true
@@ -73,13 +80,16 @@ func newHarness(t *testing.T, rules []injectRule, secrets map[string]string) *ha
 		t.Fatal(err)
 	}
 
-	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		h.mu.Lock()
-		h.got = append(h.got, seen{r.Header.Get("Authorization"), r.URL.Path, r.Method, string(b)})
-		h.mu.Unlock()
-		fmt.Fprint(w, "upstream ok")
-	}))
+	if upstream == nil {
+		upstream = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			h.mu.Lock()
+			h.got = append(h.got, seen{r.Header.Get("Authorization"), r.URL.Path, r.Method, string(b)})
+			h.mu.Unlock()
+			fmt.Fprint(w, "upstream ok")
+		})
+	}
+	up := httptest.NewTLSServer(upstream)
 	t.Cleanup(up.Close)
 	upURL, _ := url.Parse(up.URL)
 	upPool := x509.NewCertPool()
@@ -98,6 +108,7 @@ func newHarness(t *testing.T, rules []injectRule, secrets map[string]string) *ha
 	}
 	t.Cleanup(func() { ln.Close() })
 	go h.in.serve(ln)
+	h.addr = ln.Addr().String()
 
 	caPool := x509.NewCertPool()
 	caPool.AddCert(mustParse(der))
@@ -259,10 +270,11 @@ func TestInjectPushBranches(t *testing.T) {
 	if !strings.HasSuffix(h.last().body, "0000PACK....") || !strings.Contains(h.last().body, "refs/heads/agent/fix-tests") {
 		t.Fatalf("push body not forwarded intact: %q", h.last().body)
 	}
-	if code, body := push("refs/heads/agent/x", "refs/heads/main"); code != 403 || !strings.Contains(body, "refs/heads/main") {
-		t.Fatalf("push to main: %d %s", code, body)
+	before := h.count()
+	if code, body := push("refs/heads/agent/x", "refs/heads/main"); code != 200 || !strings.Contains(body, "ng refs/heads/main zoo keeper: push to refs/heads/main isn't allowed") || h.count() != before {
+		t.Fatalf("push to main: %d %q (upstream hits %d -> %d)", code, body, before, h.count())
 	}
-	if code, _ := push("refs/tags/v1"); code != 403 {
+	if _, body := push("refs/tags/v1"); !strings.Contains(body, "ng refs/tags/v1") || h.count() != before {
 		t.Fatal("tag push allowed")
 	}
 	// Reads still work, other writes don't.

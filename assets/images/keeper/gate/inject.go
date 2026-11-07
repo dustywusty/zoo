@@ -322,6 +322,14 @@ func (in *injector) handler(host string) http.Handler {
 		}
 		rule, _ := in.ruleFor(host)
 		if why := checkPolicy(rule, r); why != "" {
+			if rej, ok := r.Context().Value(pushRejectKey{}).(*pushReject); ok && rej.refs != nil {
+				// Answer in git's protocol so `git push` prints the reason
+				// per ref instead of "RPC failed; HTTP 403".
+				e.Verdict, e.Reason, e.Status, e.MS = "denied", why, http.StatusOK, time.Since(start).Milliseconds()
+				in.write(e)
+				writePushRejection(w, rej, "zoo keeper: "+why)
+				return
+			}
 			deny(http.StatusForbidden, why)
 			return
 		}
@@ -436,7 +444,11 @@ func checkPolicy(rule injectRule, r *http.Request) string {
 		if len(rule.Push) == 0 {
 			return "read-only: git push isn't allowed"
 		}
-		return checkPush(rule.Push, r)
+		why, rej := checkPush(rule.Push, r)
+		if why != "" && rej != nil {
+			*r = *r.WithContext(context.WithValue(r.Context(), pushRejectKey{}, rej))
+		}
+		return why
 	case r.Method == http.MethodPost && (p == "/graphql" || p == "/api/graphql"):
 		return checkGraphQL(r)
 	}
@@ -560,64 +572,109 @@ func checkLFS(r *http.Request) string {
 
 // checkPush reads git's receive-pack commands (pkt-lines before the pack)
 // and allows only refs matching the patterns.
-func checkPush(patterns []string, r *http.Request) string {
+// pushReject is what's needed to refuse a push in git's own protocol.
+type pushReject struct {
+	refs     []string
+	sideband bool
+}
+
+type pushRejectKey struct{}
+
+func pktLine(s string) []byte { return []byte(fmt.Sprintf("%04x%s", len(s)+4, s)) }
+
+// writePushRejection answers a receive-pack request with report-status
+// "ng" for every ref, so git shows "! [remote rejected] <ref> (<why>)".
+func writePushRejection(w http.ResponseWriter, rej *pushReject, why string) {
+	why = strings.ReplaceAll(why, "\n", " ")
+	var status bytes.Buffer
+	status.Write(pktLine("unpack ok\n"))
+	for _, ref := range rej.refs {
+		status.Write(pktLine("ng " + ref + " " + why + "\n"))
+	}
+	status.WriteString("0000")
+	w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	if !rej.sideband {
+		_, _ = w.Write(status.Bytes())
+		return
+	}
+	var out bytes.Buffer
+	b := status.Bytes()
+	for len(b) > 0 {
+		n := min(len(b), 65515)
+		out.Write(pktLine("\x01" + string(b[:n])))
+		b = b[n:]
+	}
+	out.Write(pktLine("\x02" + why + "\n"))
+	out.WriteString("0000")
+	_, _ = w.Write(out.Bytes())
+}
+
+func checkPush(patterns []string, r *http.Request) (string, *pushReject) {
 	if strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
-		return "push: compressed push requests aren't supported"
+		return "push: compressed push requests aren't supported", nil
 	}
 	br := bufio.NewReaderSize(r.Body, 64*1024)
 	var head bytes.Buffer
 	var refs []string
+	sideband := false
 	for {
 		var lenHex [4]byte
 		if _, err := io.ReadFull(br, lenHex[:]); err != nil {
-			return "push: can't read the ref updates"
+			return "push: can't read the ref updates", nil
 		}
 		head.Write(lenHex[:])
 		var n int
 		if _, err := fmt.Sscanf(string(lenHex[:]), "%04x", &n); err != nil {
-			return "push: malformed request"
+			return "push: malformed request", nil
 		}
 		if n == 0 {
 			break // flush: commands done, pack follows
 		}
 		if n < 4 || n > 65520 {
-			return "push: malformed request"
+			return "push: malformed request", nil
 		}
 		line := make([]byte, n-4)
 		if _, err := io.ReadFull(br, line); err != nil {
-			return "push: can't read the ref updates"
+			return "push: can't read the ref updates", nil
 		}
 		head.Write(line)
 		s := string(line)
 		if i := strings.IndexByte(s, 0); i >= 0 {
+			for _, c := range strings.Fields(s[i+1:]) {
+				if c == "side-band-64k" || c == "side-band" {
+					sideband = true
+				}
+			}
 			s = s[:i] // capabilities follow the first command
 		}
 		s = strings.TrimRight(s, "\n")
 		if strings.HasPrefix(s, "shallow ") || strings.HasPrefix(s, "push-cert") {
 			if strings.HasPrefix(s, "push-cert") {
-				return "push: signed pushes aren't supported"
+				return "push: signed pushes aren't supported", nil
 			}
 			continue
 		}
 		f := strings.Fields(s)
 		if len(f) != 3 {
-			return "push: malformed ref update"
+			return "push: malformed ref update", nil
 		}
 		refs = append(refs, f[2])
 	}
 	if len(refs) == 0 {
-		return "push: no ref updates"
+		return "push: no ref updates", nil
 	}
 	for _, ref := range refs {
 		if !refAllowed(patterns, ref) {
-			return "push to " + ref + " isn't allowed (allowed: " + strings.Join(patterns, ", ") + ")"
+			return "push to " + ref + " isn't allowed (allowed: " + strings.Join(patterns, ", ") + ")", &pushReject{refs: refs, sideband: sideband}
 		}
 	}
 	r.Body = struct {
 		io.Reader
 		io.Closer
 	}{io.MultiReader(bytes.NewReader(head.Bytes()), br), r.Body}
-	return ""
+	return "", nil
 }
 
 func refAllowed(patterns []string, ref string) bool {
