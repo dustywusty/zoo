@@ -123,6 +123,9 @@ unmask: [".env.test"]            # files the defaults would hide but this repo n
 services: [pg, github]           # services and credentials this repo's cage gets
 mounts: [../infra, ~/src/web]    # more worktrees in the same cage (masked and git-guarded too)
 git: rw                          # rw (default) | ro: history read-only | none: no .git in the cage
+cache: project                   # project (default) | shared | off: package caches, see below
+image: python:3.12-slim          # your own base image (zoo adds its user and init)
+# dockerfile: .zoo/Dockerfile    # or build one; approve with zoo build --project
 ```
 
 **zoo only uses a `zoo.yaml` you approved.** It sits in the worktree, which the agent can write, and it can grant services and unmask files. So the file on disk is a proposal: `zoo run` from a terminal shows what changed and asks; anywhere else zoo keeps the last approved copy and warns. `zoo trust` approves it explicitly, `zoo trust --show` prints what's in effect. Mounts, masks and `git:` apply when a cage is created (`zoo reset <cage>`); grants apply at once.
@@ -201,6 +204,16 @@ The CLI must be installed in the cage image: add it to `assets/images/cage/Docke
 | Claude Code | `claude setup-token` → `zoo keys set claude` | Non-essential traffic and auto-update are off inside cages |
 | Codex | `zoo keys set codex` (API key), or `zoo keys set codex-auth < ~/.codex/auth.json` (ChatGPT login) | |
 | Anything else | `env:` mapping in config | Network, resources and file safety work for every harness |
+
+## Package caches
+
+Each cage keeps its package downloads (npm, pnpm, yarn, pip, uv, Go, cargo, bun) in `~/.zoo/cache/project/<cage>`, mounted at `/home/agent/.zoo-cache`. It survives `zoo reset` and no other cage can see it. `cache: shared` (in `~/.zoo/config.yaml` or a repo's `zoo.yaml`) uses one cache, `~/.zoo/cache/shared`, for every cage that picks it: less disk, but **any cage using it can plant packages the others then install and run**, so keep `project` for repos whose agents read untrusted input. `cache: off` mounts nothing. `zoo cache ls` shows sizes; `zoo cache clear <cage|shared|all>` deletes one (not while a cage using it runs). A project cache outlives `zoo reset`, so clear it too if you think the agent was compromised. pnpm can't hard-link from the cache into `node_modules` (separate mounts), so it copies; still much faster than downloading.
+
+## Your own image
+
+The default cage has Node, Python, uv and the Claude/Codex CLIs. For other tools, give a repo its own image in `zoo.yaml` (`image: python:3.12-slim`, any image with apt-get or apk), or `dockerfile: .zoo/Dockerfile`. zoo adds what a cage needs on top: an `agent` user with your uid, zoo's init, bash, git, socat, curl and CA certificates. Agent CLIs are yours to install (`RUN npm install -g @anthropic-ai/claude-code`); `zoo run` tells you if one is missing.
+
+Agents can edit that Dockerfile, and its `RUN` steps run with network access outside the keeper, so zoo never builds a version you haven't seen: `zoo build --project` shows it, asks, and builds. Until you approve a change, cages keep the last approved image (or zoo's default) and `zoo run` says so. The build context is empty: `COPY` from the worktree doesn't work, so secrets like `.env` can't be baked in. Running cages switch after `zoo reset`.
 
 ## Credentials that never enter a cage
 
