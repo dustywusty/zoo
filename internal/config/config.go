@@ -59,6 +59,11 @@ type Global struct {
 	// Cache is the default package cache: project | shared | off.
 	Cache string `yaml:"cache"`
 
+	// Image and Dockerfile are the default for zoo.yaml's image: and
+	// dockerfile: (a cage built from your own image; see Project).
+	Image      string `yaml:"image"`
+	Dockerfile string `yaml:"dockerfile"`
+
 	// Credentials stay on the host; cages get a placeholder that the keeper
 	// swaps for the real value on the way to the credential's hosts.
 	Credentials map[string]Credential `yaml:"credentials"`
@@ -120,6 +125,12 @@ type Project struct {
 	Git      string   `yaml:"git"`      // rw (default) | ro | none
 	Mounts   []string `yaml:"mounts"`   // further worktrees in the same cage (relative to this one, or ~/...)
 	Cache    string   `yaml:"cache"`    // package cache: project (default) | shared | off
+	// Image is a base image for this repo's cage (zoo adds its user and
+	// init on top). Dockerfile is a Dockerfile in the worktree to build that
+	// base from instead; it's built only once you approve its contents with
+	// `zoo build --project`, with an empty build context.
+	Image      string `yaml:"image"`
+	Dockerfile string `yaml:"dockerfile"`
 }
 
 func Defaults() Global {
@@ -228,6 +239,12 @@ func merge(g *Global, f Global) {
 	if f.Cache != "" {
 		g.Cache = f.Cache
 	}
+	if f.Image != "" {
+		g.Image = f.Image
+	}
+	if f.Dockerfile != "" {
+		g.Dockerfile = f.Dockerfile
+	}
 	if f.Docker.Bin != "" {
 		g.Docker.Bin = f.Docker.Bin
 	}
@@ -299,6 +316,10 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 #                            # across zoo reset: project (one per cage), shared (one for every cage
 #                            # that picks it: less disk, but a compromised cage can poison packages
 #                            # the others install) or off. zoo.yaml can set it per repo
+# image: python:3.12-slim    # build cages from your own image instead of zoo's (zoo adds its
+#                            # agent user, init, bash/git/socat/curl; agent CLIs are yours to add)
+# dockerfile: .zoo/Dockerfile   # or from a Dockerfile in each worktree, built with an empty
+#                            # context once you approve it (zoo build --project). zoo.yaml wins
 # bytes_out_alert: 5242880   # alert when one cage sends this much to one host
 # ntfy_url: https://ntfy.sh/your-private-topic
 # services:                  # things cages can be granted (zoo grant <cage> <service>)

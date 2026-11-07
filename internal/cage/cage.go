@@ -56,6 +56,7 @@ type Plan struct {
 	Git         string // rw | ro | none
 	Cache       string // project | shared | off
 	CacheDir    string // host dir mounted at CacheTarget ("" for off)
+	Image       string // image to create the cage from ("" = g.CageImage)
 	SizeName    string
 	Size        config.Size
 }
@@ -372,13 +373,17 @@ func ProxyEnv(keeperIP string) []string {
 
 // Spec is the backend's view of a plan.
 func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) backend.CageSpec {
+	image := g.CageImage
+	if pl.Image != "" {
+		image = pl.Image
+	}
 	l := map[string]string{
 		LabelCage:     pl.Name,
 		LabelWorktree: pl.Root,
 		LabelSize:     pl.SizeName,
 		LabelCPUs:     fmt.Sprint(pl.Size.CPUs),
 		LabelMemory:   pl.Size.Memory,
-		LabelImage:    g.CageImage,
+		LabelImage:    image,
 	}
 	if len(pl.Extra) > 0 {
 		b, _ := json.Marshal(pl.Extra)
@@ -401,7 +406,7 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 	}
 	spec := backend.CageSpec{
 		ID:       pl.ID,
-		Image:    g.CageImage,
+		Image:    image,
 		CPUs:     pl.Size.CPUs,
 		Memory:   pl.Size.Memory,
 		Pids:     pl.Size.Pids,

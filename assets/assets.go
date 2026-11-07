@@ -12,6 +12,9 @@ import (
 //go:embed images
 var images embed.FS
 
+// File returns one embedded image source, e.g. "cage/zoo-init".
+func File(name string) ([]byte, error) { return images.ReadFile("images/" + name) }
+
 // WriteImage copies images/<name> into dir and returns the build context path.
 func WriteImage(name, dir string) (string, error) {
 	root := filepath.Join(dir, name)

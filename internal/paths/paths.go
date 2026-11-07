@@ -50,6 +50,7 @@ func CacheRoot() string               { return filepath.Join(Home(), "cache") }
 func CacheProjects() string           { return filepath.Join(CacheRoot(), "project") }
 func CacheProject(cage string) string { return filepath.Join(CacheProjects(), cage) }
 func CacheShared() string             { return filepath.Join(CacheRoot(), "shared") }
+func Dockerfiles() string             { return filepath.Join(Home(), "dockerfiles") } // approved zoo.yaml dockerfile: contents
 
 // MaskFile is the empty, read-only file mounted over secrets in cages. It
 // sits alone in its own directory: some runtimes share a single-file mount's

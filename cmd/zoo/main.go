@@ -31,6 +31,7 @@ import (
 	"github.com/dusty/zoo/internal/cage"
 	"github.com/dusty/zoo/internal/config"
 	"github.com/dusty/zoo/internal/daemon"
+	"github.com/dusty/zoo/internal/images"
 	"github.com/dusty/zoo/internal/inject"
 	"github.com/dusty/zoo/internal/keeper"
 	"github.com/dusty/zoo/internal/keys"
@@ -71,6 +72,8 @@ Usage:
   zoo ports [cage]               dev servers listening in a cage, with their preview URLs
   zoo open [cage] [port]         open a cage's dev server in the browser (http://<cage>.localhost:7779)
   zoo build [cage|keeper]        (re)build images
+  zoo build --project [path]     review and approve this worktree's dockerfile: (zoo.yaml), then
+                                 build its cage image; or rebuild the image: one
   zoo backend [list|use <name>]  show runtimes and their isolation; pick one (apple, docker, podman, auto)
   zoo status                     backend, keeper, daemon, isolation, shims
   zoo service ls                 services cages can be granted (config: services:)
@@ -515,6 +518,9 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 	if err != nil {
 		return cage.Plan{}, "", err
 	}
+	if pl.Image, err = cageImage(ctx, e, root, proj); err != nil {
+		return cage.Plan{}, "", err
+	}
 	if existing, ok, _ := e.b.Get(ctx, pl.ID); ok && size != "" && existing.Labels[cage.LabelSize] != pl.SizeName {
 		say("resizing %s from %s to %s (restarts the cage; the worktree is untouched)", pl.Name, existing.Labels[cage.LabelSize], pl.SizeName)
 		_ = e.b.Delete(ctx, pl.ID)
@@ -532,6 +538,10 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 	if exists && st.Running {
 		switch cage.Changed(st, spec) {
 		case "image":
+			if strings.HasPrefix(spec.Image, images.Repo+":") || strings.HasPrefix(st.Labels[cage.LabelImage], images.Repo+":") {
+				say("note: %s's image changed (image: or dockerfile:); it applies after `zoo reset %s`", pl.Name, pl.Name)
+				break
+			}
 			say("WARNING: %s was created by an older zoo; its secret masks and git guard may not hold. Stop the agents in it, then `zoo reset %s`", pl.Name, pl.Name)
 		case "layout":
 			say("note: %s's mounts or git settings changed (zoo.yaml or git config); they apply after `zoo reset %s`", pl.Name, pl.Name)
@@ -695,6 +705,11 @@ func runIn(o runOpts, cageName string) error {
 	}
 	if st, ok, _ := e.b.Get(ctx, pl.ID); ok {
 		env = append(env, cage.CacheEnv(st.Labels)...)
+		if img := st.Labels[cage.LabelImage]; img != e.g.CageImage {
+			if err := checkHarness(ctx, e.b, pl.ID, img, o.harness, h.Command); err != nil {
+				return err
+			}
+		}
 	}
 	var missing []string
 	for envName, item := range h.Env {
@@ -1439,6 +1454,9 @@ func cmdBuild(args []string) error {
 	}
 	if !e.info.Ready() {
 		return fmt.Errorf("%s backend isn't ready: %s", e.b.Name(), e.info.Hint)
+	}
+	if len(args) > 0 && args[0] == "--project" {
+		return buildProject(ctx, e, args[1:])
 	}
 	which := []string{"keeper", "cage"}
 	if len(args) > 0 {
