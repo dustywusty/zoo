@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -40,6 +41,9 @@ func TestParseStatHeuristicFallback(t *testing.T) {
 }
 
 func TestRunArgs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apple cages run on macOS; Windows temp paths have a drive colon")
+	}
 	dir := t.TempDir()
 	root := filepath.Join(dir, "repo")
 	git := filepath.Join(root, ".git")

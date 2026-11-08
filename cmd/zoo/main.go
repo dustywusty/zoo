@@ -31,11 +31,13 @@ import (
 	"github.com/dusty/zoo/internal/cage"
 	"github.com/dusty/zoo/internal/config"
 	"github.com/dusty/zoo/internal/daemon"
+	"github.com/dusty/zoo/internal/gitrefs"
 	"github.com/dusty/zoo/internal/images"
 	"github.com/dusty/zoo/internal/inject"
 	"github.com/dusty/zoo/internal/keeper"
 	"github.com/dusty/zoo/internal/keys"
 	"github.com/dusty/zoo/internal/paths"
+	"github.com/dusty/zoo/internal/proc"
 	"github.com/dusty/zoo/internal/services"
 	"github.com/dusty/zoo/internal/shims"
 )
@@ -61,9 +63,11 @@ Usage:
   zoo deny <host...>             remove hosts from the allowlist
   zoo allowlist                  print the allowlist
   zoo blocked [cage]             hosts the keeper refused that aren't allowlisted (approve with zoo allow)
+  zoo refs [ok] [cage]           branches and tags a cage moved besides its own (ok: accept them)
   zoo keys set|rm <name>         store a credential in the Keychain (e.g. "claude", "codex")
   zoo keys ls                    which harness credentials are stored
-  zoo shims install|uninstall    put claude/codex/... shims on PATH so other tools land in cages
+  zoo shims install [--path]|uninstall
+                                 shims so other tools land in cages (--path: Windows user PATH)
   zoo doctor [--deep] [--json] [cage]
                                  prove the walls hold from inside a cage; --deep also probes
                                  for reachable private addresses (other cages, LAN, metadata);
@@ -96,6 +100,10 @@ Escape hatch: ZOO=off claude ...  runs the real CLI outside any cage.
 `
 
 func main() {
+	// Started as <harness>.exe from the shims dir (Windows shims): be the shim.
+	if h, ok := shims.Invoked(); ok {
+		os.Exit(shims.Run(h, os.Args[1:]))
+	}
 	argv, err := parseGlobal(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "zoo:", err)
@@ -133,6 +141,8 @@ func main() {
 		err = cmdAllowlist()
 	case "blocked":
 		err = cmdBlocked(args)
+	case "refs":
+		err = cmdRefs(args)
 	case "keys":
 		err = cmdKeys(args)
 	case "shims":
@@ -232,8 +242,12 @@ func buildImage(ctx context.Context, b backend.Backend, which, tag string) error
 	}
 	args := map[string]string{}
 	if which == "cage" {
-		args["AGENT_UID"] = strconv.Itoa(os.Getuid())
-		args["AGENT_GID"] = strconv.Itoa(os.Getgid())
+		// Windows has no uid (Getuid is -1); Docker Desktop shows Windows
+		// files to every guest uid alike, so the image default is fine.
+		if uid, gid := os.Getuid(), os.Getgid(); uid >= 0 && gid >= 0 {
+			args["AGENT_UID"] = strconv.Itoa(uid)
+			args["AGENT_GID"] = strconv.Itoa(gid)
+		}
 	}
 	return b.BuildImage(ctx, backend.ImageSpec{Tag: tag, Context: dir, BuildArgs: args})
 }
@@ -355,7 +369,7 @@ func startDaemon(g config.Global) error {
 	defer logf.Close()
 	cmd := exec.Command(self, "daemon")
 	cmd.Stdout, cmd.Stderr = logf, logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	proc.Detach(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -377,9 +391,7 @@ func stopDaemon() {
 	}
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
 	if pid > 0 {
-		if p, err := os.FindProcess(pid); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
-		}
+		_ = proc.Terminate(pid)
 	}
 	_ = os.Remove(paths.DaemonPID())
 }
@@ -413,11 +425,17 @@ func cmdDash() error {
 		}
 	}
 	url := fmt.Sprintf("http://127.0.0.1:%d", g.Port)
-	opener := "open"
-	if runtime.GOOS != "darwin" {
-		opener = "xdg-open"
+	var open *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		open = exec.Command("open", url)
+	case "windows":
+		open = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		open = exec.Command("xdg-open", url)
 	}
-	if err := exec.Command(opener, url).Run(); err != nil {
+	proc.Quiet(open)
+	if err := open.Run(); err != nil {
 		fmt.Println(url)
 	}
 	return nil
@@ -545,6 +563,8 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 			say("WARNING: %s was created by an older zoo; its secret masks and git guard may not hold. Stop the agents in it, then `zoo reset %s`", pl.Name, pl.Name)
 		case "layout":
 			say("note: %s's mounts or git settings changed (zoo.yaml or git config); they apply after `zoo reset %s`", pl.Name, pl.Name)
+		case "masks":
+			say("WARNING: secret files in %s changed since its cage started; new ones are readable inside it until it restarts. Stop the agents in it, then `zoo stop %s` (the next run re-masks)", pl.Root, pl.Name)
 		}
 	}
 	if !exists || (!st.Running && cage.Stale(st, spec)) {
@@ -777,10 +797,11 @@ func runIn(o runOpts, cageName string) error {
 
 	spec := backend.ExecSpec{
 		ID: pl.ID, Cmd: append([]string{"/usr/local/bin/zoo-session", h.Command}, o.rest...),
-		User: "agent", Workdir: workdir, EnvFile: envFile,
+		User: "agent", Workdir: backend.GuestPath(workdir), EnvFile: envFile,
 		TTY: isTerminal(os.Stdin) && isTerminal(os.Stdout),
 	}
 
+	beginRefWatch(pl)
 	sess := registerSession(g, pl.Name, o.harness)
 	defer endSession(g, sess)
 	// Remove the env file once the CLI has read it.
@@ -789,6 +810,7 @@ func runIn(o runOpts, cageName string) error {
 	for _, r := range pl.Roots() {
 		warnGitTraps(r)
 	}
+	warnRefChanges(pl.Name, pl.Root, false)
 	if err != nil {
 		return err
 	}
@@ -1230,6 +1252,9 @@ func cmdKeys(args []string) error {
 		fmt.Fprintln(tw, "ITEM\tSOURCE\tAVAILABLE\tUSED BY")
 		row := func(item, usedBy string) {
 			src, name := keys.Describe(item)
+			if src == "keychain" {
+				src = keys.StoreName() // where zoo keeps its own items on this OS
+			}
 			ok, hint := keys.Available(item)
 			avail := "yes"
 			if !ok {
@@ -1270,7 +1295,7 @@ func cmdKeys(args []string) error {
 			if err != nil {
 				return err
 			}
-			v := strings.TrimRight(string(b), "\n")
+			v := strings.TrimRight(string(b), "\r\n") // Windows pipes end lines with \r\n
 			if v == "" {
 				return errors.New("empty value on stdin")
 			}
@@ -1322,7 +1347,23 @@ func cmdShims(args []string) error {
 		for _, w := range written {
 			fmt.Println("  " + w)
 		}
-		if !shims.OnPath() {
+		setPath := len(args) > 1 && args[1] == "--path"
+		switch {
+		case setPath:
+			changed, err := shims.SetUserPath(paths.Shims(), true)
+			if err != nil {
+				return err
+			}
+			if changed {
+				fmt.Printf("\n%s is now first on your user PATH. Restart Orca, Conductor and open terminals so they pick it up.\n", paths.Shims())
+			} else {
+				fmt.Printf("\n%s was already first on your user PATH.\n", paths.Shims())
+			}
+			fmt.Println("Escape hatch: set ZOO=off to run the real CLI.")
+		case shims.OnPath():
+		case runtime.GOOS == "windows":
+			fmt.Printf("\nPut %s first on your user PATH so other apps find these shims:\n\n  zoo shims install --path\n\nThen restart Orca, Conductor and terminals. Escape hatch: set ZOO=off.\n", paths.Shims())
+		default:
 			fmt.Printf("\nAdd this as the LAST line of ~/.zshrc (and ~/.zprofile, so GUI apps that read your login shell see it):\n\n  export PATH=\"%s:$PATH\"\n\nEscape hatch: ZOO=off claude …\n", paths.Shims())
 		}
 		return nil
@@ -1330,6 +1371,11 @@ func cmdShims(args []string) error {
 		removed, err := shims.Uninstall()
 		for _, r := range removed {
 			fmt.Println("removed " + r)
+		}
+		if runtime.GOOS == "windows" {
+			if changed, perr := shims.SetUserPath(paths.Shims(), false); perr == nil && changed {
+				fmt.Printf("removed %s from your user PATH\n", paths.Shims())
+			}
 		}
 		return err
 	}
@@ -1357,9 +1403,9 @@ func cmdDoctor(args []string) error {
 		return err
 	}
 	env := []string{
-		"ZOO_MASKS=" + strings.Join(pl.Masks, "\n"),
-		"ZOO_READONLY=" + strings.Join(pl.ReadOnly, "\n"),
-		"ZOO_PIN=" + strings.Join(pl.Pin, "\n"),
+		"ZOO_MASKS=" + strings.Join(backend.GuestPaths(pl.Masks), "\n"),
+		"ZOO_READONLY=" + strings.Join(backend.GuestPaths(pl.Guarded()), "\n"),
+		"ZOO_PIN=" + strings.Join(backend.GuestPaths(pl.Pin), "\n"),
 		"ZOO_GIT=" + pl.Git,
 		"ZOO_INJECT_HOSTS=" + injectHosts(),
 		"ZOO_KEEPER=" + ip,
@@ -1373,7 +1419,7 @@ func cmdDoctor(args []string) error {
 	}
 	var outb bytes.Buffer
 	code, runErr := e.b.Exec(ctx, backend.ExecSpec{
-		ID: pl.ID, User: "agent", Workdir: pl.Root, NoStdin: true,
+		ID: pl.ID, User: "agent", Workdir: backend.GuestPath(pl.Root), NoStdin: true,
 		Cmd:    []string{"/usr/local/bin/zoo-doctor"},
 		Env:    append(env, cage.ProxyEnv(ip)...),
 		Stdout: &outb, Stderr: &outb,
@@ -1405,6 +1451,15 @@ func cmdDoctor(args []string) error {
 			checks = append(checks, doctorCheck{"WARN", "git-traps", "scan stopped early in " + root + " (too many files)"})
 		} else {
 			checks = append(checks, doctorCheck{"PASS", "git-traps", "no planted repositories in " + root})
+		}
+	}
+	if _, ok := gitrefs.Load(paths.RefSnapshot(pl.Name)); ok {
+		if alarms := warnRefChanges(pl.Name, pl.Root, true); len(alarms) > 0 {
+			for _, c := range alarms {
+				checks = append(checks, doctorCheck{"WARN", "refs", c.String() + " (review: zoo refs; undo: " + c.Undo() + ")"})
+			}
+		} else {
+			checks = append(checks, doctorCheck{"PASS", "refs", "no branches or tags moved besides the cage's own"})
 		}
 	}
 	var risks []cage.GitRisk
@@ -1497,4 +1552,99 @@ func injectHosts() string {
 		return ""
 	}
 	return strings.Join(strings.Fields(string(b)), " ")
+}
+
+// --- refs: branches a cage moved ---------------------------------------------------
+
+// beginRefWatch snapshots the repo's refs as a session starts, so its end
+// (and the daemon, meanwhile) can say what the cage moved besides its own
+// branch. Alarms nobody accepted yet are reported again instead.
+func beginRefWatch(pl cage.Plan) {
+	common, gitDir := cage.GitDirs(pl.Root)
+	if common == "" {
+		return
+	}
+	pending, err := gitrefs.Begin(paths.RefSnapshot(pl.Name), common, gitDir)
+	if errors.Is(err, gitrefs.ErrReftable) {
+		say("note: this repo uses reftable ref storage; zoo can't watch which branches the cage moves")
+		return
+	}
+	if len(pending) > 0 {
+		say("%d branch/tag change(s) from an earlier session in %s are still unreviewed:", len(pending), pl.Name)
+		printRefChanges(pending)
+	}
+}
+
+// warnRefChanges reports refs moved since the session (or the last
+// `zoo refs ok`) began. Returns the alarms.
+func warnRefChanges(name, root string, quiet bool) []gitrefs.Change {
+	common, gitDir := cage.GitDirs(root)
+	snap, ok := gitrefs.Load(paths.RefSnapshot(name))
+	if common == "" || !ok {
+		return nil
+	}
+	changes := gitrefs.Check(snap, common, gitDir)
+	alarms := gitrefs.Alarms(changes)
+	if quiet {
+		return alarms
+	}
+	for _, c := range changes {
+		if !c.Alarm {
+			say("note: %s", c)
+		}
+	}
+	if len(alarms) > 0 {
+		say("WARNING: refs changed in %s besides the cage's own branch. Check them before you push:", name)
+		printRefChanges(alarms)
+		say("If you did this yourself on the host (a fetch, a commit on main), accept it: zoo refs ok %s", name)
+	}
+	return alarms
+}
+
+func printRefChanges(cs []gitrefs.Change) {
+	for _, c := range cs {
+		fmt.Fprintf(os.Stderr, "    %s\n        undo: %s\n", c, c.Undo())
+	}
+}
+
+func cmdRefs(args []string) error {
+	accept := len(args) > 0 && args[0] == "ok"
+	if accept {
+		args = args[1:]
+	}
+	g, err := loadCfg()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	e, err := resolve(ctx, g)
+	if err != nil {
+		return err
+	}
+	c, err := currentOrNamed(ctx, e, args)
+	if err != nil {
+		return err
+	}
+	common, gitDir := cage.GitDirs(c.Worktree)
+	if common == "" {
+		return fmt.Errorf("%s isn't a git worktree", c.Worktree)
+	}
+	if accept {
+		if err := gitrefs.Rebaseline(paths.RefSnapshot(c.Name), common, gitDir); err != nil {
+			return err
+		}
+		say("accepted the current branches and tags for %s", c.Name)
+		return nil
+	}
+	if _, ok := gitrefs.Load(paths.RefSnapshot(c.Name)); !ok {
+		fmt.Println("no snapshot yet: one is taken when a session starts (zoo run)")
+		return nil
+	}
+	if len(warnRefChanges(c.Name, c.Worktree, true)) == 0 {
+		warnRefChanges(c.Name, c.Worktree, false)
+		fmt.Println("no branches or tags moved besides the cage's own")
+		return nil
+	}
+	warnRefChanges(c.Name, c.Worktree, false)
+	return nil
 }

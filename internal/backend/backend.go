@@ -94,6 +94,10 @@ type CageSpec struct {
 	// read-only directories and before the read-only files, which may sit
 	// inside them.
 	ReopenRW []string
+	// Files are read-only file mounts whose content differs from the host
+	// path they cover (a .git pointer rewritten for the guest's paths).
+	// Mounted last. Source is a host path, Target the host path covered.
+	Files []Mount
 }
 
 // KeeperSpec describes the keeper instance.
@@ -171,6 +175,14 @@ type Sample struct {
 	Pids       float64            `json:"pids"`
 	Have       map[string]bool    `json:"have"` // cpu, cpu_time, mem, net, blk, pids
 	Raw        map[string]float64 `json:"raw,omitempty"`
+}
+
+// Watcher is a backend that can say when its instances change, so callers
+// wait for events instead of polling (docker, through its API: D25). The
+// channel gets a value per burst of changes and closes when the stream
+// ends; call Watch again to resume.
+type Watcher interface {
+	Watch(ctx context.Context) (<-chan struct{}, error)
 }
 
 // Backend creates and runs cages and the keeper.

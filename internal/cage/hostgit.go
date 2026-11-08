@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/dusty/zoo/internal/proc"
 )
 
 // A repository can arrive with hooks and config that run commands the next
@@ -84,7 +86,9 @@ func gitConfigEntries(file string) [][2]string {
 	if _, err := os.Stat(file); err != nil {
 		return nil
 	}
-	out, err := exec.Command("git", "config", "--file", file, "--null", "--list").Output()
+	cmd := exec.Command("git", "config", "--file", file, "--null", "--list")
+	proc.Quiet(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return nil
 	}

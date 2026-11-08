@@ -16,6 +16,43 @@ jobs:
       - run: go test ./...
       - run: shellcheck -s bash assets/images/cage/zoo-doctor && shellcheck -s sh assets/images/cage/zoo-init assets/images/cage-overlay/zoo-setup assets/images/keeper/keeper-entrypoint
 
+  # Windows: the whole suite, natively (named pipes for docker and SSH
+  # agents, Credential Manager, exe shims, no console windows: D25). No
+  # Linux containers on these runners, so the escape suite on Windows is
+  # run by hand.
+  windows-unit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - run: go vet ./...
+      - run: go test ./...
+
+  # The daemon's engine API path (D25) against real engines: detect, list,
+  # inspect, streamed stats (CPU must read ~a core for a busy container) and
+  # a stop event. Podman through its Docker-compatible service (D30).
+  engine-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - run: go test -c -o docker.test ./internal/backend/docker
+      - name: docker
+        run: |
+          docker run -d --name zoo-enginetest alpine sh -c 'while :; do :; done'
+          ZOO_TEST_ENGINE=docker ZOO_TEST_ENGINE_HOST=unix:///var/run/docker.sock ZOO_TEST_ENGINE_CAGE=zoo-enginetest \
+            ZOO_TEST_BUSY=1 ZOO_TEST_ENGINE_STOP="docker stop -t 1 zoo-enginetest" ./docker.test -test.run TestRealEngineBackend -test.v
+      - name: podman
+        run: |
+          podman --version
+          sudo podman run -d --name zoo-enginetest docker.io/library/alpine sh -c 'while :; do :; done'
+          sudo sh -c 'podman system service --time=0 unix:///tmp/podman.sock > /tmp/podman-svc.log 2>&1 &'
+          for i in $(seq 1 50); do [ -S /tmp/podman.sock ] && break; sleep 0.2; done
+          sudo ZOO_TEST_ENGINE_HOST=unix:///tmp/podman.sock ZOO_TEST_ENGINE_CAGE=zoo-enginetest \
+            ZOO_TEST_BUSY=1 ZOO_TEST_ENGINE_STOP="podman stop -t 1 zoo-enginetest" ./docker.test -test.run TestRealEngineBackend -test.v
+
   # M1 gate: docker backend, escape suite inside a real cage.
   docker-escape-suite:
     runs-on: ubuntu-latest
@@ -46,6 +83,16 @@ jobs:
         run: |
           test -z "$($GITHUB_WORKSPACE/zoo run shell -- -c 'cat .env')"
           grep -q SECRET=1 .env
+      - name: secrets in build output, and ones added after the cage started, are hidden
+        working-directory: /tmp/repo
+        run: |
+          # Added while the cage runs: readable until it restarts, and zoo says so.
+          mkdir -p .next/standalone && echo SECRET=3 > .next/standalone/.env
+          $GITHUB_WORKSPACE/zoo run shell -- -c true 2>&1 | tee /tmp/run.txt
+          grep -q 'secret files in /tmp/repo changed' /tmp/run.txt
+          $GITHUB_WORKSPACE/zoo stop /tmp/repo
+          test -z "$($GITHUB_WORKSPACE/zoo run shell -- -c 'cat .next/standalone/.env')"
+          grep -q SECRET=3 .next/standalone/.env
       - name: a repository planted by the agent is caught on the host
         working-directory: /tmp/repo
         run: |
@@ -54,6 +101,17 @@ jobs:
           grep -q 'git-traps: /tmp/repo/planted/.git (nested repository)' /tmp/doctor.txt
           rm -rf planted
           $GITHUB_WORKSPACE/zoo doctor
+      - name: a branch moved by the agent is reported on the host
+        working-directory: /tmp/repo-wt
+        run: |
+          git -C /tmp/repo branch victim
+          $GITHUB_WORKSPACE/zoo run shell -- -c 'git -c user.name=a -c user.email=a@a commit -q --allow-empty -m evil && git update-ref refs/heads/victim HEAD' 2> /tmp/run.txt
+          cat /tmp/run.txt
+          grep -q 'refs/heads/victim moved' /tmp/run.txt
+          grep -q 'undo: git update-ref refs/heads/victim' /tmp/run.txt
+          $GITHUB_WORKSPACE/zoo refs 2>&1 | grep -q 'refs/heads/victim moved'
+          $GITHUB_WORKSPACE/zoo refs ok
+          $GITHUB_WORKSPACE/zoo refs 2>&1 | grep -q 'no branches or tags moved'
       - name: floor refuses container isolation by default
         working-directory: /tmp/repo
         run: |

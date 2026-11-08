@@ -32,6 +32,7 @@ func Shims() string                  { return filepath.Join(Home(), "shims") }
 func Tmp() string                    { return filepath.Join(Home(), "tmp") }
 func Build() string                  { return filepath.Join(Home(), "build") }
 func Stage() string                  { return filepath.Join(Home(), "stage") }
+func RefSnapshot(cage string) string { return filepath.Join(Home(), "refs", cage+".json") }
 func Grants() string                 { return filepath.Join(Home(), "grants.json") }
 func GateToken() string              { return filepath.Join(Home(), "gate-token") }
 func GateConf() string               { return filepath.Join(KeeperEtc(), "gate.json") }

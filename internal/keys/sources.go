@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
+
+	"github.com/dusty/zoo/internal/proc"
 )
 
 // Secret source prefixes.
@@ -22,11 +25,9 @@ const (
 var cliTimeout = 15 * time.Second
 
 const (
-	bwInstallHint = "install the Bitwarden CLI (brew install bitwarden-cli), run `bw login` and `bw unlock`, then export BW_SESSION"
-	bwUnlockHint  = "run `bw unlock` and export the BW_SESSION it prints"
-	bwLoginHint   = "run `bw login`, then `bw unlock` and export BW_SESSION"
-	opInstallHint = "install the 1Password CLI (brew install 1password-cli) and run `op signin`"
-	opSigninHint  = "`op` not signed in: run `op signin` (or enable the 1Password app's CLI integration)"
+	bwUnlockHint = "run `bw unlock` and export the BW_SESSION it prints"
+	bwLoginHint  = "run `bw login`, then `bw unlock` and export BW_SESSION"
+	opSigninHint = "`op` not signed in: run `op signin` (or enable the 1Password app's CLI integration)"
 )
 
 // Resolve returns the secret a reference names. References:
@@ -372,6 +373,7 @@ func runCLI(bin string, args ...string) (string, error) {
 	var out, errb bytes.Buffer
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdin = nil
+	proc.Quiet(cmd)
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	cmd.Env = os.Environ()
 	cmd.WaitDelay = time.Second
@@ -413,4 +415,20 @@ func baseName(p string) string {
 		return p[i+1:]
 	}
 	return p
+}
+
+// Install hints name this OS's installer.
+var (
+	bwInstallHint = "install the Bitwarden CLI (" + byOS("brew install bitwarden-cli", "winget install Bitwarden.CLI", "npm install -g @bitwarden/cli") + "), run `bw login` and `bw unlock`, then export BW_SESSION"
+	opInstallHint = "install the 1Password CLI (" + byOS("brew install 1password-cli", "winget install AgileBits.1Password.CLI", "https://developer.1password.com/docs/cli/get-started") + ") and run `op signin`"
+)
+
+func byOS(mac, windows, other string) string {
+	switch runtime.GOOS {
+	case "darwin":
+		return mac
+	case "windows":
+		return windows
+	}
+	return other
 }

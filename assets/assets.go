@@ -3,6 +3,7 @@
 package assets
 
 import (
+	"bytes"
 	"embed"
 	"io/fs"
 	"os"
@@ -31,6 +32,9 @@ func WriteImage(name, dir string) (string, error) {
 		if err != nil {
 			return err
 		}
+		// Everything here is text that runs in Linux. A Windows checkout
+		// with core.autocrlf embeds CRLF, and "#!/bin/sh\r" doesn't run.
+		b = bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
 		mode := os.FileMode(0o644)
 		if filepath.Base(p) != "Dockerfile" {
 			mode = 0o755
