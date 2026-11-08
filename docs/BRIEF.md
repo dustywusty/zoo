@@ -1,7 +1,7 @@
 # zoo: the complete build brief
 
 > **Audience:** an autonomous coding agent working in a goal loop on this repository, plus the human (Dusty) who owns it.
-> **Status as of 2026-10-28:** v0 exists (Apple `container` backend, squid keeper, basic dashboard). This brief takes it from v0 to a multi-backend, fully observable agent sandbox.
+> **Status as of 2026-11-07:** multi-backend (Apple, Docker, Podman), keeper with services and credentials, dashboard; see section 6. This brief takes it to a fully observable agent sandbox. User docs live in the README and `docs/`; this file is the design.
 > **Rule zero:** this file is the source of truth for *what* to build and *why*. If code and this brief disagree, the brief wins unless the Decision Log says otherwise. If you change a decision, record it in the Decision Log (section 15) in the same commit.
 
 ---
@@ -13,7 +13,7 @@
 3. [Invariants: things that must never break](#3-invariants-things-that-must-never-break)
 4. [Threat model](#4-threat-model)
 5. [Glossary](#5-glossary)
-6. [Current state: v0](#6-current-state-v0)
+6. [Current state](#6-current-state)
 7. [Target architecture](#7-target-architecture)
 8. [Backends](#8-backends)
 9. [The keeper (network)](#9-the-keeper-network)
@@ -154,55 +154,56 @@ Every backend, every release. The escape suite (section 16.3) tests these. If a 
 
 ---
 
-## 6. Current state: v0
+## 6. Current state
 
-v0 was written in one sitting and **tested only against a fake `container` CLI**, not on real macOS 26 hardware. Treat every Apple-specific behavior as `needs-hw-verify` until M0 closes.
+As of 2026-11-07: Apple, Docker and Podman backends, on macOS, Linux and Windows (Docker Desktop); keeper with allowlist, gate and credential injector; services and grants; the worktree guard; dashboard; doctor. User-facing docs: [README](../README.md), [getting started](getting-started.md), [guide](guide.md), [how it works](how-it-works.md), [security](security.md). This section is the map for whoever builds next.
 
 ### 6.1 Repository layout
 
 ```
-cmd/zoo/main.go            CLI: up/down/run/shell/ls/stop/reset/allow/deny/allowlist/
-                           blocked/keys/shims/doctor/dash/build/daemon/version
-assets/
-  assets.go                go:embed of images/, WriteImage() copies a build context out
-  images/cage/Dockerfile   node:22-bookworm-slim + git, rg, jq, python3, uv, claude-code, codex;
-                           user "agent" with host uid/gid (build args); onboarding pre-seeded
-  images/cage/zoo-init     PID 1, root: masks secrets (bind /etc/zoo/masked, remount ro),
-                           makes ZOO_READONLY paths read-only, logs to /run/zoo/init.log, idles
-  images/cage/zoo-doctor   in-cage checks: direct egress, DNS, allowlisted via keeper,
-                           non-allowlisted denied, masks, git guard, init log, host-port exposure
-  images/keeper/Dockerfile debian:bookworm-slim + squid
-  images/keeper/keeper-entrypoint  squid -k parse, then squid -N
+cmd/zoo/                   CLI, one file per area: main.go (up/run/prepare/doctor/allow…),
+                           backend.go, services.go, trust.go, doctor.go, ssh.go, preview.go,
+                           cache.go, image.go
+assets/images/
+  cage/                    Dockerfile (node:22-bookworm-slim + git, rg, python3, uv, socat,
+                           openssh-server, claude-code, codex; user "agent" = host uid/gid),
+                           zoo-init (PID 1), zoo-session (per-session wrapper: ssh-agent relay),
+                           zoo-doctor (escape suite), sshd_config (SSH door)
+  cage-overlay/            what zoo adds on top of a user's image (zoo-setup, overlay.Dockerfile)
+  keeper/                  Dockerfile (squid + zoo-gate), keeper-entrypoint,
+                           gate/ (stdlib Go: service gate + credential injector)
 internal/
-  paths/    ~/.zoo layout (ZOO_HOME overrides)
-  config/   ~/.zoo/config.yaml (global) + zoo.yaml (per repo); sizes; harness table
-  backend/  Backend interface; apple/ (container CLI, ZOO_CONTAINER_BIN), docker/ (docker|podman, ZOO_DOCKER_BIN)
-  jsonx/    tolerant JSON digging (container CLI JSON isn't a stable contract)
-  cage/     plan (worktree root, git dirs, masks, read-only paths, size), run args, ensure, list, find
-  keeper/   squid.conf, allowlist (normalize/allow/deny/prune), keeper VM up/reload, log parsing
-  keys/     macOS Keychain (service "zoo"); file fallback (ZOO_KEYS_FILE=1) elsewhere
-  shims/    PATH shims with ZOO=off / ZOO_INSIDE escape
-  daemon/   log tailer, stats poller (heuristic field matching), sessions, sentinel (deny, bytes-out),
-            SSE + JSON API, guard (loopback Host, token on writes), embedded web/index.html
-docs/BRIEF.md              this file
-README.md                  user docs
-Makefile                   build / test / install / dist (darwin/arm64)
+  backend/                 Backend interface; apple/, docker/ (docker|podman), dockerapi/ (Engine API
+                           client zood uses), guest paths for Windows; contract/ suite
+  cage/                    plan (root, masks, git guard, pins, mounts, cache, image), git traps
+                           and risks, list/find
+  config/                  config.yaml, zoo.yaml + trust, durations, default masks
+  gitrefs/                 ref snapshots; "branch moved" reports (zoo refs)
+  proc/                    OS differences for zoo's processes (detach, no console windows)
+  keeper/                  squid.conf, allowlist + expiries, access log
+  services/                services, grants + expiries, gate.json, in-cage names
+  inject/                  credentials: placeholders, CA, keeper files, cage trust setup
+  daemon/                  zood: log tails, stats, alerts, host bridge, previews, SSE API,
+                           web/index.html
+  sshagent/, sshdoor/      filtering SSH-agent proxy; SSH door
+  images/                  custom cage images, Dockerfile approval
+  keys/                    Keychain / file secrets; Bitwarden, 1Password refs
+  shims/, paths/, jsonx/
+test/fakes/                fake container/docker/podman CLIs with recorded state
+docs/                      user docs, overview.html, this brief
 ```
 
-### 6.2 How v0 works
+### 6.2 How it works
 
-1. `zoo up`: checks `container` CLI and service; builds `zoo-keeper` and `zoo-cage` images if missing; `container network create --internal zoo-cages`; runs keeper VM on **two networks** (`default` + `zoo-cages`) with `~/.zoo/keeper/etc` → `/etc/zoo` and `~/.zoo/keeper/log` → `/var/log/zoo`; records keeper IP in `~/.zoo/state.json`; starts the daemon detached (`zoo daemon`, Setsid, log to `~/.zoo/daemon.log`).
-2. `zoo run <harness>`: resolves worktree root (`git rev-parse --show-toplevel`), plans the cage (name `<slug>-<sha1[:6]>`, container id `zoo-<name>`), creates it if missing with `--network zoo-cages --no-dns -c -m`, labels, `ZOO_MASKS`/`ZOO_READONLY`/proxy env, `-v root:root` (+ main `.git` for worktrees). Then `container exec -i [-t] -u agent -w <cwd> --env-file <tmp 0600> zoo-<name> <cmd> <args>`; credentials come from Keychain items mapped in config. Registers a session with the daemon; removes it on exit.
-3. Daemon: polls `container list` and `container stats` every 2 s; tails `access.log`; attributes requests to cages by client IP; raises alerts on denied requests (deduped 10 min per cage+host) and on >5 MB cumulative upload to one host; optional ntfy push; SSE stream to the dashboard.
-4. Dashboard (`127.0.0.1:7777`): cage cards (CPU, memory, network rates, sessions, counts, Stop), alerts, live network table with search (`-term` excludes), cage and verdict filters, pause, one-click Allow (global).
+See [how-it-works.md](how-it-works.md) for the narrative and [overview.html](overview.html) for sequence diagrams. In one paragraph: `zoo up` builds images, creates internal networks, starts the keeper (squid + zoo-gate + injector) dual-homed, and starts zood. `zoo run` plans the cage, creates or starts it (host-side read-only mounts, all capabilities dropped, no DNS), syncs the gate and injector, applies in-cage names and CA trust as guest root, writes session secrets to a 0600 env file, and execs the harness through zoo-session as `agent`. zood tails access/gate/inject logs, attributes by cage IP, samples stats, raises alerts, expires temporary allows and grants, answers the host bridge (host services, SSH agents, credential values), and serves the dashboard and previews on loopback.
 
 ### 6.3 Tested
 
-- Unit: allowlist normalize/allow/deny/prune, squid ACL order, log parsing, mask discovery, git-worktree plan, planted-repository scan, run args, tolerant JSON.
-- End to end against a fake `container` CLI: up, keys, run (env file contents, args), ls, live log ingest, attribution, alerts, sessions, restart backfill, doctor rendering, shims including `ZOO=off`, dashboard guard (403 on foreign Host / missing token).
-- `shellcheck` on in-image scripts; JS syntax check of the dashboard.
+- Unit and fake-runtime tests (`go test ./...`), the contract suite over apple/docker/podman fakes, gate and injector tests with real TLS and a real `git push`.
+- CI on every push: gofmt, vet, tests, shellcheck; the whole suite natively on Windows; the Engine API path against real Docker and Podman; the escape suite (`zoo doctor`) in a real Docker cage on Linux, main checkout and linked worktree, including masks in build output and a moved branch being reported.
+- By hand: Apple 1.6.1 and OrbStack (M0–M2S, see 19.2); Docker Desktop for the 2026-11-07 pass (credentials, trust, doctor --deep, expiry, SSH door, previews, git modes, mounts, custom images). Apple not re-verified since D31.
 
-### 6.4 Not yet verified on real hardware (M0 must verify)
+### 6.4 Apple hardware verification (M0, kept for reference)
 
 **Status (2026-10-28, container 1.6.1 on macOS 27.0.1):** two networks via repeated `--network` ✓; `exec --env-file` ✓ (quotes kept literally) and exec inherits `run -e` ✓; in-guest bind/remount ✗ (no CAP_SYS_ADMIN: replaced by host-side mounts, D11); virtiofs ownership ✓ (guest sees root:root and doesn't enforce modes, host sees your uid); stats fields ✓ (`cpuUsageUsec` cumulative µs, `memoryUsageBytes`, `memoryLimitBytes`, `networkRxBytes`, `networkTxBytes`, `blockReadBytes`, `blockWriteBytes`, `numProcesses`); `build --build-arg` ✓; squid writes the virtiofs log dir ✓; harnesses honoring `HTTPS_PROXY` (not yet: needs tokens). Also learned: IPs change on restart; no `--pids-limit` (use `--ulimit nproc`); `image inspect` works for existence; `-u nosuchuser` leaves a stale exec record that blocks `delete --force` until `stop`.
 
@@ -216,17 +217,16 @@ Makefile                   build / test / install / dist (darwin/arm64)
 - Squid writing to a virtiofs-mounted log dir as user `proxy`.
 - Claude Code and Codex honoring `HTTPS_PROXY` with an IP-literal proxy and no DNS in the cage.
 
-### 6.5 Known v0 limitations (each is scheduled in section 14)
+### 6.5 Known limitations (each is scheduled in section 14)
 
-- Single backend (Apple). Hard dependency on the `container` CLI shape.
-- Global allowlist only; no per-project or per-harness layering beyond harness `allow:` auto-add.
-- Attribution per cage IP, not per agent.
-- No telemetry store; history is the squid log plus an in-memory ring.
-- No file watcher, no in-guest sensor, no harness OTel ingestion, no AG-UI timeline.
-- No SSH door (Orca remote mode).
-- Keeper IP changes require new sessions to pick up the new proxy (cage-level env keeps the old one until reset).
-- No disk limit; no Docker-in-cage.
-- Dashboard is a single static HTML page (no build step), not React.
+- Global allowlist only (plus temporary entries); no per-project or per-harness layering beyond harness `allow:` (M2).
+- Attribution per cage IP, not per agent (M5).
+- No telemetry store; history is the logs plus an in-memory ring (M3).
+- No file watcher, in-guest sensor, harness OTel ingestion or AG-UI timeline (M4, M7, M8).
+- Apple cages share one network and see the host gateway (apple/container#1320).
+- No disk limit; no Docker-in-cage (M4, M6).
+- Dashboard is a single static HTML page, not React (M7).
+- `zoo.yaml`'s `harness:` key is parsed but unused.
 
 ---
 
@@ -663,7 +663,7 @@ Existing commands stay (see README). Add:
 
 ### 13.2 Config
 
-`~/.zoo/config.yaml` (global), `zoo.yaml` (per repo). Target schema:
+`~/.zoo/config.yaml` (global), `zoo.yaml` (per repo). What's implemented today is in the [guide's config reference](guide.md#config-reference) (including `services`, `credentials`, `git`, `cache`, `image`, `preview_port`, `docker.runtime`, and `zoo.yaml`'s `mounts`). Target schema, for what's still to come:
 
 ```yaml
 backend: auto            # auto|apple|docker|k8s|lima|firecracker
