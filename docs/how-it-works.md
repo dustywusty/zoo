@@ -1,8 +1,7 @@
 # How it works
 
-The short version: every agent runs in a **cage** on a network with no way out except the **keeper**, and **zood**, a daemon on your machine, watches everything and holds the secrets. This page explains the pieces, how a request flows, and why it's built this way. The diagrams in [overview.html](overview.html) show the same with trust boundaries; [BRIEF.md](BRIEF.md) has the decisions behind each choice (numbered `D<n>`).
+The short version: every agent runs in a **cage** on a network with no way out except the **keeper**, and **zood**, a daemon on your machine, watches everything and holds the secrets. This page explains the pieces, how a request flows, and why it's built this way. [Architecture](architecture.md) shows the same as diagrams, with trust boundaries; [BRIEF.md](BRIEF.md) has the decisions behind each choice (numbered `D<n>`).
 
-![architecture](images/architecture.png)
 
 ## Why
 

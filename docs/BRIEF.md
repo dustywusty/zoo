@@ -190,12 +190,12 @@ internal/
   keys/                    Keychain / file secrets; Bitwarden, 1Password refs
   shims/, paths/, jsonx/
 test/fakes/                fake container/docker/podman CLIs with recorded state
-docs/                      user docs, overview.html, this brief
+docs/                      user docs, architecture.md (diagrams), this brief
 ```
 
 ### 6.2 How it works
 
-See [how-it-works.md](how-it-works.md) for the narrative and [overview.html](overview.html) for sequence diagrams. In one paragraph: `zoo up` builds images, creates internal networks, starts the keeper (squid + zoo-gate + injector) dual-homed, and starts zood. `zoo run` plans the cage, creates or starts it (host-side read-only mounts, all capabilities dropped, no DNS), syncs the gate and injector, applies in-cage names and CA trust as guest root, writes session secrets to a 0600 env file, and execs the harness through zoo-session as `agent`. zood tails access/gate/inject logs, attributes by cage IP, samples stats, raises alerts, expires temporary allows and grants, answers the host bridge (host services, SSH agents, credential values), and serves the dashboard and previews on loopback.
+See [how-it-works.md](how-it-works.md) for the narrative and [architecture.md](architecture.md) for the trust boundaries and sequence diagrams. In one paragraph: `zoo up` builds images, creates internal networks, starts the keeper (squid + zoo-gate + injector) dual-homed, and starts zood. `zoo run` plans the cage, creates or starts it (host-side read-only mounts, all capabilities dropped, no DNS), syncs the gate and injector, applies in-cage names and CA trust as guest root, writes session secrets to a 0600 env file, and execs the harness through zoo-session as `agent`. zood tails access/gate/inject logs, attributes by cage IP, samples stats, raises alerts, expires temporary allows and grants, answers the host bridge (host services, SSH agents, credential values), and serves the dashboard and previews on loopback.
 
 ### 6.3 Tested
 

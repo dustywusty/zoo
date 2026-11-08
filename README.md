@@ -51,7 +51,7 @@ The full list, and what zoo doesn't stop, is in [Security](docs/security.md).
 | [Guide](docs/guide.md) | Everything you can do: commands, `zoo.yaml`, services, credentials, previews, SSH and editors, caches, custom images, dashboard, config reference, troubleshooting |
 | [How it works](docs/how-it-works.md) | The pieces, how a request flows, and why it's built this way |
 | [Security](docs/security.md) | Threat model, what a cage can and can't do, known gaps |
-| [Architecture diagram](docs/overview.html) | Trust boundaries and sequence diagrams (open locally) |
+| [Architecture](docs/architecture.md) | Trust boundaries, what can reach what, and sequence diagrams |
 | [Contributing](CONTRIBUTING.md) | Building, testing, and how changes are made |
 | [Design brief](docs/BRIEF.md) | Invariants, decisions and roadmap: the source of truth for what zoo is |
 
