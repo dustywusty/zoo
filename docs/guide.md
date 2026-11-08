@@ -11,9 +11,11 @@ Everything you can do with zoo, roughly in the order you'll need it. New here? S
 - [Agents and harnesses](#agents-and-harnesses)
 - [Previewing dev servers](#previewing-dev-servers)
 - [SSH and editors](#ssh-and-editors)
+- [Branches the agent moves](#branches-the-agent-moves)
 - [Package caches](#package-caches)
 - [Your own image](#your-own-image)
 - [The dashboard](#the-dashboard)
+- [Windows](#windows)
 - [Config reference](#config-reference)
 - [Files](#files)
 - [Troubleshooting](#troubleshooting)
@@ -32,13 +34,14 @@ Everything you can do with zoo, roughly in the order you'll need it. New here? S
 | `zoo service ls` | Services and credentials, and which cages hold them |
 | `zoo grant [--for 4h] <cage> <name>` / `zoo revoke <cage> <name>` | Give a cage a service or credential, for a while or for good |
 | `zoo trust [path] [--show]` | Approve this worktree's `zoo.yaml` |
+| `zoo refs [ok] [cage]` | Branches and tags the cage moved besides its own, with undo commands; `ok` accepts them |
 | `zoo keys set\|rm <name>` / `zoo keys ls` | Secrets in your Keychain |
 | `zoo ports [cage]` / `zoo open [cage] [port]` | Dev servers in a cage, and their preview URLs |
 | `zoo ssh setup` / `zoo ssh [cage] [cmd…]` | SSH into cages, for editors |
 | `zoo cache ls` / `zoo cache clear <cage\|shared\|all>` | Package caches |
 | `zoo doctor [--deep] [--json] [cage]` | Check every wall from inside a cage |
 | `zoo dash` | Open the dashboard |
-| `zoo shims install\|uninstall` | Put `claude`/`codex`/… shims on PATH so other tools land in cages |
+| `zoo shims install [--path]\|uninstall` | Put `claude`/`codex`/… shims on PATH so other tools land in cages (`--path`: Windows user PATH) |
 | `zoo build [cage\|keeper]` / `zoo build --project` | Rebuild images / approve and build this repo's Dockerfile |
 | `zoo backend [list\|use <name>]` | Show runtimes and their isolation; pick one |
 
@@ -63,7 +66,20 @@ Define your own under `sizes:` in `~/.zoo/config.yaml`.
 
 **Reset.** `zoo reset <cage>` deletes it; the next run starts from a clean image. Do this after changing masks, mounts, `git:` or the image, or if you think the agent tampered with its own environment. Your worktree and the cage's package cache are kept (`zoo cache clear` for the cache).
 
-**What's inside.** Your worktree at the same path as on your machine, read-write. Secret-looking files (`.env*`, `*.pem`, `*.key`, `*.p12`, `id_rsa*`, `id_ed25519*`, `.npmrc`, `.pypirc`, `.netrc`) read as empty. `.git/hooks`, `.git/config` and other worktrees' git data are read-only. Nothing else from your machine: no home directory, SSH keys, cloud credentials or Docker socket.
+**What's inside.** Your worktree at the same path as on your machine (on Windows, `C:\Users\you\repo` appears as `/c/Users/you/repo`), read-write. Secret files read as empty (see [masks](#masks)). `.git/hooks`, `.git/config` and other worktrees' git data are read-only. Nothing else from your machine: no home directory, SSH keys, cloud credentials or Docker socket.
+
+### Masks
+
+zoo hides files matching these names anywhere in the worktree (to a depth of 12, build output included; `node_modules`, `vendor`, virtualenvs and similar dependency trees skipped):
+
+- env files and tool secrets: `.env`, `.env.*`, `.envrc`, `.dev.vars`, `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, `.pgpass`, `.htpasswd`
+- keys and keystores: `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `id_dsa*`
+- cloud and cluster credentials: `credentials.json`, `client_secret*.json`, `service-account*.json`, `application_default_credentials.json`, `kubeconfig`, `*.kubeconfig`, `.kube/config`, `.aws/credentials`, `.docker/config.json`, `.dockercfg`
+- infrastructure: `*.tfvars`, `*.tfstate`, `*.tfstate.*`, `secrets.yaml`, `secrets.yml`, `secrets.json`
+
+Not hidden: `*.example`, `*.sample`, `*.template`, `*.pub`. Add more per repo with `mask:` in `zoo.yaml`, or show one with `unmask:`. `masks:` in `~/.zoo/config.yaml` *replaces* the built-in list.
+
+Masks are set when a cage starts. A secret file added while it runs is readable inside until it restarts; `zoo run` warns, and the next start hides it. If a worktree has more than 512 matches, zoo refuses to start the cage rather than hide only some: `unmask:` the ones that aren't secret (test fixtures, sample keys).
 
 ## The allowlist
 
@@ -241,6 +257,17 @@ You're the `agent` user, with the same keeper, allowlist and services as `zoo ru
 - **VS Code / Cursor:** `"remote.SSH.enableAgentForwarding": false`, `"github.gitAuthentication": false`, `"git.terminalAuthentication": false`, `"git.useIntegratedAskPass": false`. Otherwise git in the cage is answered from your desktop's credentials. `"remote.SSH.localServerDownload": "always"` saves allowlisting Microsoft's download hosts.
 - **JetBrains Gateway** downloads its backend from inside the cage: allowlist its hosts (`zoo blocked` shows them).
 
+## Branches the agent moves
+
+In `git: rw` mode a cage has to write the repo's refs (its commits must be visible outside), and mounts can't separate one branch from another. So an agent *can* move `main`, point `origin/main` somewhere so it looks pushed, or move a tag. zoo can't stop that, so it reports it: when a session starts it snapshots the refs, and at the end of the session, on the dashboard (within 30 s) and in `zoo doctor` it lists anything moved besides the cage's own branch, with the command to undo it:
+
+```sh
+zoo refs              # what moved, with undo commands
+zoo refs ok           # accept it (e.g. you fetched or committed on the host yourself)
+```
+
+zoo can't tell who moved a ref, so your own `git fetch` on the host while a cage runs shows up too; `zoo refs ok` accepts it. Repos using reftable ref storage aren't watched. For no risk at all, use `git: ro`; for pushes, a [credential](#credentials-that-never-enter-a-cage) with `push:` branches.
+
 ## Package caches
 
 Each cage keeps its package downloads (npm, pnpm, yarn, pip, uv, Go, cargo, bun) in `~/.zoo/cache/project/<cage>`, so `zoo reset` doesn't mean downloading everything again. No other cage sees it.
@@ -279,6 +306,18 @@ zoo adds what a cage needs on top: an `agent` user with your uid, zoo's init, ba
 
 It listens on 127.0.0.1 only; changes need a per-install token, so other web pages can't drive it.
 
+## Windows
+
+zoo runs on Windows with Docker Desktop (WSL 2 backend) and `--isolation-floor container`. Cages share Docker Desktop's Linux VM kernel, not Windows'.
+
+- **Paths:** your worktree appears inside the cage as `/c/Users/you/repo`. zoo shows the cage rewritten copies of git's pointer files (yours aren't touched) and passes your `core.autocrlf` through, so git in the cage sees the same clean tree you do.
+- **Secrets:** `zoo keys set` stores them in Windows Credential Manager as generic credentials named `zoo:<name>`.
+- **Shims:** `.exe` copies of zoo (`claude.exe`, `codex.exe`) in `%USERPROFILE%\.zoo\shims`, because Node-based tools like Orca and Conductor won't launch `.cmd` files. `zoo shims install --path` puts that folder first on your user PATH; restart Orca and your terminals. `set ZOO=off` runs the real CLI.
+- **SSH agent services** use the Windows agent pipe (`\\.\pipe\openssh-ssh-agent`), served by the OpenSSH agent service, 1Password and Bitwarden: `ssh-agent: system`, `1password` or `bitwarden` all work.
+- **The dashboard daemon** runs without a window and watches Docker through its API.
+
+Repos on network shares (`\\server\…`) can't be caged. Large `node_modules` trees are slow over Docker Desktop's file sharing; a [package cache](#package-caches) helps with downloads but not with the share itself.
+
 ## Config reference
 
 `~/.zoo/config.yaml`. Everything is optional; `zoo up` writes a commented starter.
@@ -291,7 +330,7 @@ It listens on 127.0.0.1 only; changes need a per-install token, so other web pag
 | `port` | `7777` | Dashboard (127.0.0.1). The host bridge uses `port`+1 |
 | `preview_port` | `port`+2 | Dev-server previews; `0` turns them off |
 | `default_size`, `sizes` | `small` | See [Cages](#cages) |
-| `masks`, `unmask` | see above | File-name patterns hidden / not hidden in every cage |
+| `masks`, `unmask` | see [Masks](#masks) | File patterns hidden / not hidden in every cage. `masks:` *replaces* the built-in list; to add, use `mask:` in `zoo.yaml` |
 | `git` | `rw` | Default for `zoo.yaml`'s `git:` |
 | `cache` | `project` | Default for `zoo.yaml`'s `cache:` |
 | `image`, `dockerfile` | | Defaults for `zoo.yaml`'s `image:` / `dockerfile:` |
@@ -304,7 +343,7 @@ It listens on 127.0.0.1 only; changes need a per-install token, so other web pag
 
 `zoo.yaml` keys: `size`, `mask`, `unmask`, `services`, `mounts`, `git`, `cache`, `image`, `dockerfile` (see [Per-repo settings](#per-repo-settings-zooyaml)).
 
-Environment: `ZOO_HOME` (instead of `~/.zoo`), `ZOO_BACKEND`, `ZOO_ISOLATION_FLOOR`, `ZOO=off` (shims run the real CLI), `ZOO_KEYS_FILE=1` (files instead of the Keychain).
+Environment: `ZOO_HOME` (instead of `~/.zoo`), `ZOO_BACKEND`, `ZOO_ISOLATION_FLOOR`, `ZOO=off` (shims run the real CLI), `ZOO_KEYS_FILE=1` (files instead of the Keychain or Credential Manager).
 
 ## Files
 
@@ -322,6 +361,7 @@ Everything zoo keeps is under `~/.zoo`:
 | `trust/`, `dockerfiles/` | Approved copies of each worktree's `zoo.yaml` and Dockerfile |
 | `cred-key` | The key placeholders are signed with (never leaves your machine) |
 | `cache/` | Package caches |
+| `refs/` | Each cage's branch and tag snapshot, for `zoo refs` |
 | `services/<name>/` | Sidecar data |
 | `ssh/` | The SSH door's key and config |
 | `daemon.log` | Dashboard daemon log |
@@ -335,6 +375,9 @@ Everything zoo keeps is under `~/.zoo`:
 - **"zoo.yaml isn't approved" / "changed since you approved it":** review it, then `zoo trust`.
 - **Files in the worktree owned by the wrong user:** the cage image uses your uid at build time; `zoo build cage` then `zoo reset <cage>`.
 - **TLS errors to a credential host:** the cage predates the credential; `zoo reset <cage>`. `zoo doctor` checks this.
+- **"more than 512 secret-looking files":** zoo won't start a cage it can only partly mask. Add the ones that aren't secret (fixtures, sample keys) to `unmask:` in `zoo.yaml`.
+- **"refs changed besides the cage's own branch":** see [Branches the agent moves](#branches-the-agent-moves); `zoo refs ok` if it was you.
+- **"secret files changed since its cage started":** a new secret is readable in the running cage; stop its agents, then `zoo stop <cage>` (the next run hides it).
 - **husky (or another hook installer) fails in the cage:** expected. Its hooks directory is read-only inside, because hooks there would run on your machine at your next commit. Run the install on your machine.
 - **Dashboard empty:** `cat ~/.zoo/daemon.log`, then `zoo down && zoo up`.
 - **Your machine's open ports are visible to Apple cages:** see [Known gaps](security.md#known-gaps).

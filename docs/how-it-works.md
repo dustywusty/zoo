@@ -28,7 +28,7 @@ The other half is visibility. When an agent works for an hour in the background,
 
 The keeper's config and logs live on your machine (`~/.zoo/keeper`), mounted into the keeper and never into a cage.
 
-**zood**, the daemon on your machine (`zoo up` starts it). It tails the keeper's logs, samples resources, raises alerts, serves the dashboard on 127.0.0.1, and runs the **host bridge**: the only path from the keeper back to your machine, authenticated by a token, used for host-port services, SSH agents and credential values. Cages can't reach it.
+**zood**, the daemon on your machine (`zoo up` starts it). It watches Docker and Podman through their APIs (events, not polling, and no console windows on Windows), tails the keeper's logs, samples resources, raises alerts, serves the dashboard on 127.0.0.1, and runs the **host bridge**: the only path from the keeper back to your machine, authenticated by a token, used for host-port services, SSH agents and credential values. Cages can't reach it.
 
 **The CLI.** `zoo run` plans the cage (masks, git guard, size), creates or reuses it, puts session secrets in a 0600 env file the runtime reads (never on a command line), and execs the agent through `zoo-session`. Shims make `claude` or `codex` anywhere call `zoo run`.
 
@@ -69,7 +69,9 @@ The worktree is the one place the agent can write that you also act on. zoo is c
 
 - **`zoo.yaml`** can grant services and unmask secrets, so zoo uses only a copy you've approved (`zoo trust`).
 - **A Dockerfile** named by `zoo.yaml` runs with network access when built, so zoo builds only the version you approved, with an empty build context.
-- **Git.** Hooks and config are read-only, but the agent can still create a nested `.git`, a bare repository, or a `.git` file pointing elsewhere, any of which brings config your git (or your shell prompt or editor) would honour. Mounts can't stop that, so zoo looks: after each session, every 30 seconds in the daemon, and in `zoo doctor`.
+- **Git.** Hooks and config are read-only, but the agent can still create a nested `.git`, a bare repository, or a `.git` file pointing elsewhere, any of which brings config your git (or your shell prompt or editor) would honour. It can also move branches besides its own, since it has to write refs to commit. Mounts can't stop either, so zoo looks: it snapshots refs when a session starts, and checks after each session, every 30 seconds in the daemon, and in `zoo doctor`, telling you how to undo a moved branch.
+
+On Windows, a host path like `C:\Users\you\repo` can't be mounted at the same path, so the cage sees `/c/Users/you/repo`, with rewritten read-only copies of git's pointer files and your `core.autocrlf` passed through.
 
 ## Previews and SSH without opening ports
 
@@ -89,4 +91,4 @@ Both need to reach into a cage from your machine, and your machine often can't r
 - **One cage per worktree.** That's how orchestrators work: a worktree lives for days and agents come and go (D3).
 - **Host-side masks.** Masks applied from outside the guest can't be undone from inside, so cages can drop every capability (D10, D11).
 - **Approve by hand, no learn mode.** An allow-everything mode lets the agent reach your machine and cloud metadata exactly when it matters most (D24).
-- **Decrypt only what you name.** TLS interception everywhere would see everything and break pinned clients; decrypting only credential hosts, with a CA that can't sign for anything else, gets tokens out of cages without that (D29).
+- **Decrypt only what you name.** TLS interception everywhere would see everything and break pinned clients; decrypting only credential hosts, with a CA that can't sign for anything else, gets tokens out of cages without that (D35).

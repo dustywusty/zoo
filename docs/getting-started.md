@@ -35,6 +35,7 @@ zoo runs cages on one of these:
 | `apple` | macOS 26+ on Apple silicon, with [`container`](https://github.com/apple/container/releases) installed | **vm**: every cage is its own VM |
 | `docker` | OrbStack, Docker Desktop, colima or Docker Engine, macOS or Linux | **container**: cages share one kernel |
 | `podman` | Podman (a machine on macOS, native on Linux) | **container** |
+| `docker` on Windows | Docker Desktop with the WSL 2 backend | **container** (Docker Desktop's Linux VM kernel, not Windows') |
 
 `zoo backend` shows what's installed and ready. zoo picks the strongest one automatically.
 
@@ -44,7 +45,9 @@ zoo runs cages on one of these:
 zoo up --backend docker --isolation-floor container
 ```
 
-On Linux, Docker with Kata (`docker.runtime: kata` in `~/.zoo/config.yaml`) gives every cage its own kernel again.
+On Linux, Docker with Kata (`docker.runtime: kata` in `~/.zoo/config.yaml`) gives every cage its own kernel again. With Podman, the dashboard reads it through its API service when one is running (Linux: `systemctl --user enable --now podman.socket`).
+
+**On Windows**, use Docker Desktop and the same `--isolation-floor container`. Your worktree shows up inside the cage as `/c/Users/you/repo`; zoo handles git's paths and line endings so the cage sees the same clean tree you do. Secrets go to Windows Credential Manager, and shims are `.exe` files (see step 8). More in the [guide](guide.md#windows).
 
 ## 3. Start zoo
 
@@ -58,7 +61,7 @@ This builds the cage and keeper images the first time (a few minutes), starts th
 
 ```sh
 claude setup-token        # on your machine: a long-lived token for Claude Code
-zoo keys set claude       # paste it; stored in your Keychain (a 0600 file on Linux)
+zoo keys set claude       # paste it; stored in your Keychain (Credential Manager on Windows, a 0600 file on Linux)
 ```
 
 For Codex: `zoo keys set codex` (an API key) or `zoo keys set codex-auth < ~/.codex/auth.json` (a ChatGPT login).
@@ -74,7 +77,7 @@ zoo run claude
 
 zoo creates a cage for this worktree (or reuses it), and runs Claude Code inside as an unprivileged user. What you'll see the first time:
 
-- **Secrets hidden:** "hiding N secret file(s)": `.env`, `*.pem`, `*.key` and similar read as empty inside.
+- **Secrets hidden:** "hiding N secret file(s)": `.env` files, keys, cloud and cluster credentials, Terraform state and similar read as empty inside, including copies in build output.
 - **Git warnings, if any:** zoo lists hooks and git config in the repo that run commands when *you* use git. A repo you downloaded (say, a take-home assignment) can carry a hook that runs a payload at your first commit; check the list.
 - **A `zoo.yaml` prompt, if the repo has one:** agents can edit that file, so zoo only uses a version you approve. It shows the file and asks.
 
@@ -118,6 +121,8 @@ export PATH="$HOME/.zoo/shims:$PATH"
 ```
 
 Restart the app afterwards. GUI apps that don't read your shell's PATH can point their agent path setting at `~/.zoo/shims/claude`. `ZOO=off claude` runs the real CLI outside any cage.
+
+On Windows, `zoo shims install --path` puts `%USERPROFILE%\.zoo\shims` (with `claude.exe`, `codex.exe`) first on your user PATH; restart Orca and your terminals. `set ZOO=off` runs the real CLI.
 
 Editors (VS Code, Cursor, JetBrains Gateway, Orca remote mode) can open a cage over SSH: see [SSH and editors](guide.md#ssh-and-editors).
 

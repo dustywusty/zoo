@@ -8,7 +8,7 @@ Coding agents read web pages, issues and dependency docs, and any of that text c
 
 - **Works with any agent:** Claude Code, Codex, pi, opencode, or anything that runs as a CLI.
 - **Works with any launcher:** your terminal, Conductor, herdr, Orca, scripts. Shims catch `claude` and `codex` wherever they start; no tool needs to know zoo exists.
-- **Runs on your machine:** Apple `container` (a VM per cage) on macOS 26+, or Docker/OrbStack/Podman on macOS and Linux.
+- **Runs on your machine:** Apple `container` (a VM per cage) on macOS 26+, Docker/OrbStack/Podman on macOS and Linux, or Docker Desktop on Windows.
 
 ## Quick start
 
@@ -26,7 +26,7 @@ zoo dash                            # the dashboard: cages, resources, every req
 
 The first time, the agent will hit hosts that aren't approved yet. Approve the ones you trust with **Allow** on the red row in the dashboard, or `zoo blocked` then `zoo allow <host>`. `zoo doctor` proves the walls hold from inside the cage.
 
-Using Docker or Podman instead of Apple's `container`? See [Getting started](docs/getting-started.md#2-pick-a-backend).
+Using Docker, Podman, or Windows? See [Getting started](docs/getting-started.md#2-pick-a-backend).
 
 ## What a cage stops
 
@@ -36,6 +36,7 @@ Using Docker or Podman instead of Apple's `container`? See [Getting started](doc
 | Sending your code to some server | A 403 from the keeper, an alert on the dashboard |
 | Using your GitHub token elsewhere | A placeholder: the real token stays in the keeper ([credentials](docs/guide.md#credentials-that-never-enter-a-cage)) |
 | Pushing to `main` | Refused, when pushes go through a credential with `push: ["agent/*"]` |
+| Quietly moving `main` (or `origin/*`, or a tag) in your repo | Reported when the session ends, on the dashboard and in `zoo refs`, with the command to undo it |
 | Planting a git hook that runs on your Mac later | Read-only `.git`; planted repositories flagged |
 | Reaching your LAN, other cages or cloud metadata | No route |
 | Granting itself more via `zoo.yaml` | Ignored until you approve the change |

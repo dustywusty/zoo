@@ -156,7 +156,7 @@ Every backend, every release. The escape suite (section 16.3) tests these. If a 
 
 ## 6. Current state
 
-As of 2026-11-07: Apple, Docker and Podman backends; keeper with allowlist, gate and credential injector; services and grants; the worktree guard; dashboard; doctor. User-facing docs: [README](../README.md), [getting started](getting-started.md), [guide](guide.md), [how it works](how-it-works.md), [security](security.md). This section is the map for whoever builds next.
+As of 2026-11-07: Apple, Docker and Podman backends, on macOS, Linux and Windows (Docker Desktop); keeper with allowlist, gate and credential injector; services and grants; the worktree guard; dashboard; doctor. User-facing docs: [README](../README.md), [getting started](getting-started.md), [guide](guide.md), [how it works](how-it-works.md), [security](security.md). This section is the map for whoever builds next.
 
 ### 6.1 Repository layout
 
@@ -173,10 +173,13 @@ assets/images/
   keeper/                  Dockerfile (squid + zoo-gate), keeper-entrypoint,
                            gate/ (stdlib Go: service gate + credential injector)
 internal/
-  backend/                 Backend interface; apple/, docker/ (docker|podman); contract/ suite
+  backend/                 Backend interface; apple/, docker/ (docker|podman), dockerapi/ (Engine API
+                           client zood uses), guest paths for Windows; contract/ suite
   cage/                    plan (root, masks, git guard, pins, mounts, cache, image), git traps
                            and risks, list/find
-  config/                  config.yaml, zoo.yaml + trust, durations
+  config/                  config.yaml, zoo.yaml + trust, durations, default masks
+  gitrefs/                 ref snapshots; "branch moved" reports (zoo refs)
+  proc/                    OS differences for zoo's processes (detach, no console windows)
   keeper/                  squid.conf, allowlist + expiries, access log
   services/                services, grants + expiries, gate.json, in-cage names
   inject/                  credentials: placeholders, CA, keeper files, cage trust setup
@@ -197,7 +200,7 @@ See [how-it-works.md](how-it-works.md) for the narrative and [overview.html](ove
 ### 6.3 Tested
 
 - Unit and fake-runtime tests (`go test ./...`), the contract suite over apple/docker/podman fakes, gate and injector tests with real TLS and a real `git push`.
-- CI on every push: gofmt, vet, tests, shellcheck; the escape suite (`zoo doctor`) in a real Docker cage on Linux, main checkout and linked worktree.
+- CI on every push: gofmt, vet, tests, shellcheck; the whole suite natively on Windows; the Engine API path against real Docker and Podman; the escape suite (`zoo doctor`) in a real Docker cage on Linux, main checkout and linked worktree, including masks in build output and a moved branch being reported.
 - By hand: Apple 1.6.1 and OrbStack (M0–M2S, see 19.2); Docker Desktop for the 2026-11-07 pass (credentials, trust, doctor --deep, expiry, SSH door, previews, git modes, mounts, custom images). Apple not re-verified since D31.
 
 ### 6.4 Apple hardware verification (M0, kept for reference)

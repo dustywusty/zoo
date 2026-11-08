@@ -50,6 +50,9 @@ After changing anything under `assets/images/`, rebuild: `zoo build`, then `zoo 
 | `internal/daemon` | zood: log tailing, alerts, the host bridge, previews, the dashboard (`web/index.html`, one static page) |
 | `internal/sshagent`, `internal/sshdoor` | The filtering SSH-agent proxy; the SSH door |
 | `internal/config` | `config.yaml`, `zoo.yaml` and its trust |
+| `internal/gitrefs` | Ref snapshots and the "branch moved" report |
+| `internal/proc` | OS differences for zoo's own processes (detaching, no console windows on Windows) |
+| `internal/backend/dockerapi` | The Docker Engine API client zood uses for Docker and Podman |
 | `internal/images` | Custom cage images and Dockerfile approval |
 | `assets/images` | Image sources embedded in the binary: `cage/`, `cage-overlay/`, `keeper/` (with `gate/`, the gate and credential injector, stdlib-only Go) |
 | `test/fakes` | Fake `container`/`docker`/`podman` CLIs with recorded state, for testing without a runtime |
@@ -61,6 +64,7 @@ After changing anything under `assets/images/`, rebuild: `zoo build`, then `zoo 
 - **Fake runtimes.** `test/fakes/fakectr` emulates the runtime CLIs (Apple 1.6.1 and docker 29 dialects), rejects anything it doesn't know, and records state. Point a backend at it with `ZOO_CONTAINER_BIN` / `ZOO_DOCKER_BIN`.
 - **Contract suite** (`internal/backend/contract`). Every backend must pass the same table: internal networks, no capabilities, no DNS, a process cap, read-only masks and git guard. A new backend starts here.
 - **Escape suite** (`assets/images/cage/zoo-doctor`), run by `zoo doctor` inside a real cage. CI runs it on Linux with Docker against a main checkout and a linked worktree. Add a check here when you add a wall.
+- **CI** also runs the whole suite natively on Windows (`windows-unit`) and the daemon's Engine API path against real Docker and Podman (`engine-api`). The escape suite on Windows is run by hand.
 - **The keeper's gate and injector** (`assets/images/keeper/gate`) have their own tests, including real TLS round trips and a real `git push` through the injector.
 
 A security change needs a test that fails without it: a planted path that's writable, a request that gets through, a forged placeholder that's accepted.
@@ -71,6 +75,8 @@ A security change needs a test that fails without it: a planted path that's writ
 
 - **Commits:** one logical change each, message `<area>: <what>` with a body that says why (e.g. `Keeper: refuse pushes in git's protocol so git shows why`).
 - **Dependencies:** prefer the standard library. Today there's `goccy/go-yaml` and `golang.org/x/crypto`; a new one needs a reason in the commit message.
+- **Subprocesses:** wrap `exec.Command` that runs in the background with `proc.Quiet(cmd)`, or Windows flashes a console window.
+- **Paths into a cage:** host paths go through `backend.GuestPath` (Windows maps `C:\x` to `/c/x`); backends translate mounts, but anything else you pass in (workdirs, env) has to do it itself.
 - **Secrets:** never on a command line, in a log, in an image, or in a fixture that looks real.
 - **Messages:** plain words, specific, and say what to do next (`… needs macOS 26+; on older macOS use --backend docker`).
 - **Docs:** user-visible changes update `docs/guide.md` (and the README if they change the first five minutes).

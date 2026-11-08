@@ -272,7 +272,8 @@ tr:last-child td { border-bottom: 0; }
 <div class="status">
   <div class="done"><b>Built and verified</b> <span class="muted">on Apple container 1.6.1, OrbStack, Docker Desktop and Linux CI</span>
     <ul>
-      <li>Backends: apple, docker, podman (contract suite on all three); escape suite in CI</li>
+      <li>Backends: apple, docker, podman (contract suite on all three); escape suite in CI; Windows via Docker Desktop</li>
+      <li>zood watches Docker and Podman through their APIs; branch moves reported with undo (<span class="mono">zoo refs</span>)</li>
       <li>Services: host port, sidecar, remote TCP, SSH agent; grants, expiring with <span class="mono">--for</span></li>
       <li>Credentials kept in the keeper; GitHub read-only, push branches, repos</li>
       <li>zoo.yaml trust; git hook and config scan; <span class="mono">git: rw|ro|none</span>; several repos per cage</li>

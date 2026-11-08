@@ -13,7 +13,7 @@ What zoo protects, what it doesn't, and how to check. How each wall works is in 
 | | |
 |---|---|
 | Read and write your worktree | Yes |
-| See `.env*`, `*.pem`, `*.key`, `id_*`, `.npmrc`, `.netrc` in the worktree | No: empty, read-only files |
+| See secret files in the worktree: `.env*`, keys and keystores, cloud and cluster credentials, `*.tfvars`/`*.tfstate`, `secrets.*`, `.npmrc`, `.netrc` ([full list](guide.md#masks)), including copies in build output | No: empty, read-only files. Over 512 matches, zoo refuses to start the cage rather than hide only some |
 | See your home directory, SSH keys, cloud credentials, Keychain, Docker socket | No: not mounted |
 | See your GitHub token or model key | By default the model key is in the cage. With `credentials:` (and `cred:` for the model key), the cage holds only a placeholder |
 | Write `.git/hooks`, `.git/config`, other worktrees' or submodules' git data | No: read-only, and `.git` can't be renamed to get around that |
@@ -31,6 +31,7 @@ What zoo protects, what it doesn't, and how to check. How each wall works is in 
 | Bring up a VPN to route around the keeper | No capabilities to create interfaces; `zoo doctor` fails on any extra interface or a default route |
 | Gain capabilities, run setuid binaries | No: all capabilities dropped, no new privileges |
 | Push to GitHub | Not by default (agents commit, you push). Through a credential: only its `push:` branches |
+| Move a branch other than its own (`main`, `origin/*`, tags) | Can't be blocked in `git: rw` (refs are shared), so it's reported: at the end of each session, on the dashboard, in `zoo doctor` and `zoo refs`, with the command to undo it. `git: ro` prevents it |
 | Post to an allowed host with a token from elsewhere (e.g. a gist) | Possible, unless that host has a `credentials:` policy like `readonly`. The bytes-out alert is the tripwire |
 | Reach the dashboard | No: loopback only, token on writes |
 | Use a lot of CPU, memory or processes | Up to the cage's size limits |
@@ -39,14 +40,14 @@ What zoo protects, what it doesn't, and how to check. How each wall works is in 
 
 - **Apple cages can see your machine's open ports.** On an internal network the host gateway is still reachable ([apple/container#1320](https://github.com/apple/container/issues/1320)), so anything on your Mac bound to `0.0.0.0` is reachable from a cage. `zoo doctor` lists them. Common culprit: AirPlay Receiver (ports 5000 and 7000): turn it off in System Settings → General → AirDrop & Handoff. Bind dev servers to `127.0.0.1`. Host services you *want* cages to use go through [services](guide.md#services) and can stay on loopback.
 - **Allowed hosts can carry data out.** A `credentials:` policy closes that for its hosts; elsewhere the bytes-out alert (5 MB per host by default) is the tripwire and won't notice a few KB.
-- **Branches are shared.** In `git: rw` mode the cage writes the repo's refs, so an agent can move any branch, including `origin/*` so it looks pushed. Check `git log` before you push something you didn't watch it make, or use `git: ro`.
+- **Branch moves are reported, not prevented**, in `git: rw` mode, and zoo can't tell who moved a ref: a `git fetch` you run on the host while a cage runs shows up too (`zoo refs ok` accepts it). Repos using reftable ref storage aren't watched. `git: ro` prevents moves outright.
 - **Planted repositories are detected, not prevented.** A shell prompt or editor running git in the worktree *while* the agent works can beat the 30-second scan. `git config --global safe.bareRepository explicit` closes the bare-repo variant for good.
 - **Code the agent writes runs when you run it.** `package.json` scripts, tests, Makefiles: zoo doesn't review them.
-- **Docker and Podman cages share a kernel.** That's why the isolation floor refuses them by default. On macOS that kernel is OrbStack's or Docker Desktop's VM, not your Mac's.
+- **Docker and Podman cages share a kernel.** That's why the isolation floor refuses them by default. On macOS and Windows that kernel is Docker Desktop's (or OrbStack's) Linux VM, not your machine's.
 - **Credential hosts are decrypted in the keeper**, by design, so it can add the token and enforce policy. Only those hosts, with a CA that can't sign for anything else. Clients that pin certificates won't work against them.
 - **The model token is in the cage** unless you use `cred:`. Use a dedicated, revocable token either way.
 - **A project's package cache survives `zoo reset`.** If you think an agent was compromised, `zoo cache clear <cage>` too. A `shared` cache can be poisoned by any cage using it.
-- **Masks are fixed when a cage is created.** A secret file added later is hidden after `zoo reset`.
+- **Masks are fixed while a cage runs.** A secret file added later is readable in a running cage (`zoo run` warns); the next start hides it.
 - **Attribution is per cage**, not per agent, when several agents share one.
 - **No disk limit per cage yet.**
 
