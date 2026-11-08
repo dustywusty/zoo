@@ -4,27 +4,19 @@ From nothing to an agent working in a cage, in about ten minutes (most of it the
 
 ## 1. Install
 
-```sh
-brew install dustywusty/tap/zoo                 # macOS and Linux
-```
-
-Other ways:
-
-- **Debian/Ubuntu, Fedora/RHEL:** `.deb` and `.rpm` on the [releases page](https://github.com/dustywusty/zoo/releases/latest): `sudo dpkg -i zoo_<version>_linux_amd64.deb` or `sudo rpm -i zoo_<version>_linux_amd64.rpm`.
-- **Tarball:** darwin and linux, amd64 and arm64, on the same page. Unpack and put `zoo` on your PATH.
-- **From source:** Go 1.24+, then `go build -o ~/.local/bin/zoo ./cmd/zoo`.
-
-<details>
-<summary>Verifying a download</summary>
+zoo isn't packaged yet, so build it from source. You need git and [Go 1.24+](https://go.dev/dl/):
 
 ```sh
-sha256sum --check --ignore-missing checksums.txt
-gh attestation verify zoo_<version>_linux_amd64.tar.gz --repo dustywusty/zoo     # build provenance
-cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
-  --certificate-identity-regexp 'https://github.com/dustywusty/zoo/\.github/workflows/release\.yml@refs/tags/v.*' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+git clone https://github.com/dustywusty/zoo
+cd zoo
+make install          # builds zoo into ~/.local/bin
 ```
-</details>
+
+Make sure `~/.local/bin` is on your PATH (`export PATH="$HOME/.local/bin:$PATH"` in `~/.zshrc` or `~/.bashrc`), then `zoo version` should answer. To update later: `git pull && make install`.
+
+On Windows, `go build -o zoo.exe ./cmd/zoo` and put `zoo.exe` somewhere on your PATH.
+
+Homebrew, `.deb`/`.rpm` packages and signed release downloads are set up but not published yet; they'll arrive with the first release.
 
 ## 2. Pick a backend
 

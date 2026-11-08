@@ -13,7 +13,8 @@ Coding agents read web pages, issues and dependency docs, and any of that text c
 ## Quick start
 
 ```sh
-brew install dustywusty/tap/zoo     # or see docs/getting-started.md for other ways
+git clone https://github.com/dustywusty/zoo && cd zoo
+make install                        # builds zoo into ~/.local/bin (needs Go 1.24+); put that on your PATH
 zoo up                              # starts the keeper and dashboard; first run builds images (a few minutes)
 
 claude setup-token                  # a long-lived Claude Code token

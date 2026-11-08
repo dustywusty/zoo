@@ -10,6 +10,7 @@ test:
 	go test ./...
 
 install: build
+	install -d $(HOME)/.local/bin
 	install -m 0755 zoo $(HOME)/.local/bin/zoo
 
 dist:
