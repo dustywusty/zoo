@@ -81,7 +81,7 @@ tr:last-child td { border-bottom: 0; }
   <div class="cell"><h3><i class="dot" style="background:var(--green)"></i>Keeper</h3><p>squid on its own instance, the only thing a cage can reach. Default-deny allowlist by hostname, private addresses always refused, every new host approved by hand, every request logged.</p></div>
   <div class="cell"><h3><i class="dot" style="background:var(--green)"></i>Gate &amp; services</h3><p>Next to squid in the keeper. Forwards granted services (<span class="mono">pg.zoo</span>, <span class="mono">redis.zoo</span>, <span class="mono">github.com:22</span>) only to cages holding a grant.</p></div>
   <div class="cell"><h3><i class="dot" style="background:var(--amber)"></i>Guarded worktree</h3><p>Secrets like <span class="mono">.env</span> and <span class="mono">*.pem</span> read empty. <span class="mono">.git/hooks</span>, <span class="mono">.git/config</span>, other worktrees and submodules are read-only and pinned; repositories the agent plants in the worktree are flagged before your git runs them.</p></div>
-  <div class="cell"><h3><i class="dot" style="background:var(--amber)"></i>Keys stay home</h3><p>An SSH-agent proxy in front of Bitwarden or 1Password: granted keys only, signs only for allowed hosts, optional approval on the dashboard. Vault secrets are fetched per session on the host.</p></div>
+  <div class="cell"><h3><i class="dot" style="background:var(--amber)"></i>Keys stay home</h3><p>Credentials stay on the host: cages get a placeholder the keeper swaps for the real token, only on the way to that credential's hosts, with a policy (read-only, push branches, repos). An SSH-agent proxy signs for allowed hosts without the key ever leaving the vault.</p></div>
   <div class="cell"><h3><i class="dot" style="background:var(--muted)"></i>Dashboard</h3><p>Loopback-only, token-guarded. Cages, isolation level, resources, grants, approvals and one feed of everything that left a cage.</p></div>
 </div>
 
@@ -258,38 +258,40 @@ tr:last-child td { border-bottom: 0; }
   <tr><td>cage → service</td><td class="yes">granted only</td><td>zoo-gate per-port allow list of cage IPs; zood re-checks the grant on the bridge</td></tr>
   <tr><td>cage → your mac</td><td class="warn">apple: gateway visible</td><td>docker: unreachable. apple: anything bound to <span class="mono">0.0.0.0</span> is reachable (apple/container#1320); doctor reports it. Host services go through the bridge, so they can stay on loopback</td></tr>
   <tr><td>cage → other cage</td><td class="yes">docker: no</td><td>docker: one internal network per cage. apple: shared network (no live network attach)</td></tr>
-  <tr><td>cage → host files</td><td class="yes">worktree only</td><td>bind mount at the same path; secrets masked; <span class="mono">.git</span> hooks, config, worktrees/ and modules/ read-only; dirs pinned against rename; planted repos detected host-side</td></tr>
+  <tr><td>cage → host files</td><td class="yes">worktree only</td><td>bind mount at the same path (plus <span class="mono">zoo.yaml mounts:</span>); secrets masked; <span class="mono">.git</span> hooks, config, worktrees/, modules/ and hook paths git config points into the worktree read-only; dirs pinned against rename; planted repos detected host-side; <span class="mono">git: ro|none</span> for less</td></tr>
+  <tr><td>cage → zoo.yaml / Dockerfile</td><td class="warn">writes, not effect</td><td>zoo uses only the copy you approved (<span class="mono">zoo trust</span>, <span class="mono">zoo build --project</span>); Dockerfiles build with an empty context</td></tr>
   <tr><td>cage → your keys</td><td class="yes">signatures, not keys</td><td>agent proxy: key filter, <span class="mono">session-bind</span> host check, approval, log; key never leaves the vault</td></tr>
-  <tr><td>cage → credentials</td><td class="warn">model token only</td><td>env file 0600, deleted within seconds, never on argv; vault sessions never enter a cage</td></tr>
+  <tr><td>cage → credentials</td><td class="yes">placeholders</td><td>with <span class="mono">credentials:</span> and <span class="mono">cred:</span>, an HMAC-bound placeholder; the keeper decrypts only those hosts, with a CA name-constrained to them, and gets the value from zood per request. Without: the model token in an env file 0600, never on argv</td></tr>
   <tr><td>anything → dashboard</td><td class="no">no</td><td>loopback bind, Host header check, token on writes; doctor checks cages can't reach it</td></tr>
+  <tr><td>you → cage</td><td class="yes">over exec</td><td>previews (<span class="mono">&lt;port&gt;.&lt;cage&gt;.localhost</span>) and the SSH door run through the runtime's exec: no port is opened into or out of a cage</td></tr>
   <tr><td>cage → its own kernel</td><td class="warn">depends</td><td>apple: VM per cage. docker: shared kernel, so refused unless <span class="mono">isolation_floor: container</span>; shown on every card</td></tr>
 </table>
 </div>
 
 <h2>Where it stands</h2>
 <div class="status">
-  <div class="done"><b>Built and verified</b> <span class="muted">on Apple container 1.6.1 and OrbStack</span>
+  <div class="done"><b>Built and verified</b> <span class="muted">on Apple container 1.6.1, OrbStack, Docker Desktop and Linux CI</span>
     <ul>
-      <li>Backends: apple, docker, podman (contract suite on all three)</li>
-      <li>Escape suite PASS: egress, DNS, masks, git guard, rename pin, pids, dashboard</li>
-      <li>Services: host port, sidecar, remote TCP, SSH agent; grants; per-cage networks</li>
-      <li>SSH agent proxy with real OpenSSH; dashboard approvals</li>
-      <li>Bitwarden / 1Password secret refs</li>
-      <li>v0 security fixes: guest masks never applied, squid reload, <span class="mono">.git</span> rename, learn-mode IP reuse, PTR bypass</li>
+      <li>Backends: apple, docker, podman (contract suite on all three); escape suite in CI</li>
+      <li>Services: host port, sidecar, remote TCP, SSH agent; grants, expiring with <span class="mono">--for</span></li>
+      <li>Credentials kept in the keeper; GitHub read-only, push branches, repos</li>
+      <li>zoo.yaml trust; git hook and config scan; <span class="mono">git: rw|ro|none</span>; several repos per cage</li>
+      <li>Previews, SSH door, package caches, custom images</li>
+      <li><span class="mono">zoo doctor --deep</span>, interface check, gate anti-spoofing</li>
     </ul>
   </div>
   <div class="next"><b>Next</b> <span class="muted">from the brief</span>
     <ul>
-      <li>M2: per-cage allowlists with provenance, <span class="mono">zoo gc</span>, first-seen alerts</li>
+      <li>M2: per-project allowlists with provenance, <span class="mono">zoo gc</span>, first-seen alerts</li>
       <li>M3: store, zood as a service, history that survives restarts</li>
       <li>M4: file watcher and resource history</li>
-      <li>M6: Docker inside Apple cages, SSH door for Orca remote mode</li>
+      <li>M5: per-agent identity in shared cages</li>
       <li>M7: Claude Code / Codex OTel → AG-UI session timelines</li>
       <li>M9: k3s + Kata on the homelab</li>
     </ul>
   </div>
 </div>
-<p class="foot">zoo 0.3.0-dev · branch Dusty/discus · docs/BRIEF.md is the source of truth</p>
+<p class="foot">zoo · user docs in <a href="../README.md">README</a> and <a href="guide.md">guide.md</a> · <a href="BRIEF.md">BRIEF.md</a> is the source of truth</p>
 
 </div></div>
 
@@ -313,7 +315,7 @@ const SEQS = [
       [4, 0, "agent runs; exit code passes through", "ok"],
     ] },
   { id: "web", title: "web request: allowed / denied",
-    note: "Hostname-level control via CONNECT; no TLS interception. A denied host is one click to allow, for every cage today, per project in M2.",
+    note: "Hostname-level control via CONNECT; TLS is end to end, except for hosts you put under credentials: (see docs/how-it-works.md). A denied host is one click to allow, for a while or for good; per project in M2.",
     actors: ["agent (cage)", "squid", "api.anthropic.com", "zood", "you"],
     steps: [
       [0, 1, "CONNECT api.anthropic.com:443", "ac"],

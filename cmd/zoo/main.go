@@ -80,10 +80,11 @@ Usage:
                                  build its cage image; or rebuild the image: one
   zoo backend [list|use <name>]  show runtimes and their isolation; pick one (apple, docker, podman, auto)
   zoo status                     backend, keeper, daemon, isolation, shims
-  zoo service ls                 services cages can be granted (config: services:)
-  zoo grant [--for 4h] <cage> <service>
-                                 let a cage reach a service (as <service>.zoo), for a while or for good
-  zoo revoke <cage> <service>    take it back
+  zoo service ls                 services and credentials cages can be granted, and who holds them
+  zoo grant [--for 4h] <cage> <name>
+                                 give a cage a service (reached as <name>.zoo) or a credential,
+                                 for a while or for good
+  zoo revoke <cage> <name>       take it back
   zoo trust [path] [--show]      approve this worktree's zoo.yaml (agents can edit it, so zoo
                                  only uses the copy you approved)
   zoo cache ls                   package caches kept across zoo reset, and their sizes
@@ -97,6 +98,7 @@ Global flags (any command):
   --allow-weaker-isolation       start this cage even if the backend is below the floor
 
 Escape hatch: ZOO=off claude ...  runs the real CLI outside any cage.
+Docs: https://github.com/dustywusty/zoo#docs
 `
 
 func main() {
