@@ -42,8 +42,6 @@ import (
 	"github.com/dusty/zoo/internal/shims"
 )
 
-var version = "0.1.0-dev"
-
 const usage = `zoo: agents in cages, one way out.
 
 Usage:
@@ -174,7 +172,7 @@ func main() {
 	case "cache", "caches":
 		err = cmdCache(args)
 	case "version", "--version", "-v":
-		fmt.Println("zoo", version)
+		fmt.Println(versionString())
 	case "help", "--help", "-h":
 		fmt.Print(usage)
 	default:
