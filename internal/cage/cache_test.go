@@ -3,6 +3,7 @@ package cage
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -72,7 +73,8 @@ func TestCachePlan(t *testing.T) {
 			t.Errorf("plan must create %s so the agent owns it", sub)
 		}
 	}
-	if st, _ := os.Stat(want); st.Mode().Perm() != 0o700 {
+	// Windows has no Unix modes; the dir is private through its ACLs there.
+	if st, _ := os.Stat(want); runtime.GOOS != "windows" && st.Mode().Perm() != 0o700 {
 		t.Errorf("cache dir mode %v, want 0700", st.Mode().Perm())
 	}
 	projectLayout := labels[LabelLayout]

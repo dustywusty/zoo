@@ -70,7 +70,7 @@ func TestHooksPathInWorktreeIsGuarded(t *testing.T) {
 	write(t, filepath.Join(root, ".husky/pre-commit"), "npm test\n")
 	var found bool
 	for _, r := range HostGitRisks(root) {
-		if strings.HasSuffix(r.Path, ".husky/pre-commit") && r.Writable != "" {
+		if strings.HasSuffix(r.Path, filepath.Join(".husky", "pre-commit")) && r.Writable != "" {
 			found = true
 		}
 	}

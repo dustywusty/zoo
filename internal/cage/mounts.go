@@ -80,7 +80,9 @@ func checkMount(root, home, p string) error {
 			}
 		}
 	}
-	if strings.Contains(p, ":") {
+	// A drive letter (C:) is fine; a ':' anywhere else can't be passed to
+	// the runtimes' -v src:dst syntax.
+	if strings.Contains(p[len(filepath.VolumeName(p)):], ":") {
 		return fmt.Errorf("paths with ':' can't be mounted")
 	}
 	return nil
