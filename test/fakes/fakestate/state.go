@@ -38,6 +38,7 @@ type Container struct {
 	CapDrop     []string          `json:"capDrop"`   // as given
 	CapAdd      []string          `json:"capAdd"`    // as given
 	SecurityOpt []string          `json:"securityOpt"`
+	Sysctls     []string          `json:"sysctls,omitempty"`    // docker --sysctl, as given
 	DNS         []string          `json:"dns"`                  // docker --dns
 	NoDNS       bool              `json:"noDns"`                // apple --no-dns
 	ExtraHosts  []string          `json:"extraHosts,omitempty"` // docker --add-host

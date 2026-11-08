@@ -1,0 +1,37 @@
+# zoo's SSH door (M6). sshd runs per connection, as the agent user, through
+# the backend's exec (`zoo ssh-proxy`): there is no listener, and a non-root
+# sshd can only log in as itself. Root-owned; the agent can't change it.
+HostKey /home/agent/.zoo-ssh/host_ed25519
+AuthorizedKeysFile /etc/zoo/authorized_keys
+AuthorizedKeysCommand none
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+HostbasedAuthentication no
+UsePAM no
+# authorized_keys belongs to root, not to the user logging in.
+StrictModes no
+PidFile none
+
+# Nothing may lead from the cage back into the host: no agent, X11, remote
+# or unix-socket forwarding, no tunnels. Local forwarding stays on: editors
+# reach their in-cage server and forward cage ports to the host with it.
+AllowAgentForwarding no
+AllowTcpForwarding local
+AllowStreamLocalForwarding no
+GatewayPorts no
+PermitTunnel no
+X11Forwarding no
+PermitUserEnvironment no
+PermitUserRC no
+PermitTTY yes
+
+PrintMotd no
+PrintLastLog no
+LogLevel ERROR
+
+# The session environment (keeper proxy, cage name, services), written as
+# root by zoo ssh-proxy on every connection.
+Include /etc/zoo/sshd_env.conf
+
+Subsystem sftp internal-sftp

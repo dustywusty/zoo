@@ -8,9 +8,10 @@ ARG AGENT_GID=20
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl git git-lfs jq less openssh-client procps \
-      python3 python3-pip python3-venv ripgrep socat unzip util-linux xz-utils \
- && rm -rf /var/lib/apt/lists/*
+      bash ca-certificates curl git git-lfs jq less openssh-client openssh-server \
+      procps python3 python3-pip python3-venv ripgrep socat unzip util-linux xz-utils \
+ && rm -rf /var/lib/apt/lists/* \
+ && rm -f /etc/ssh/ssh_host_*
 
 # Python tooling and agent CLIs, installed at build time (with network),
 # never at agent runtime.
@@ -30,6 +31,15 @@ RUN set -eux; \
 # Skip Claude Code's first-run onboarding in fresh cages.
 RUN printf '{"hasCompletedOnboarding":true,"autoUpdates":false}\n' > /home/agent/.claude.json \
  && chown "${AGENT_UID}:${AGENT_GID}" /home/agent/.claude.json
+
+# SSH door (zoo ssh): sshd runs per connection as the agent, through the
+# backend's exec; nothing listens. Its config and authorized_keys are root's.
+# The host keys openssh-server generated above would be shared by every cage
+# built from this image and aren't used, so they are removed.
+COPY sshd_config /etc/zoo/sshd_config
+RUN chown root:root /etc/zoo/sshd_config && chmod 0644 /etc/zoo/sshd_config \
+ && : > /etc/zoo/authorized_keys && chmod 0644 /etc/zoo/authorized_keys \
+ && : > /etc/zoo/sshd_env.conf && chmod 0644 /etc/zoo/sshd_env.conf
 
 COPY zoo-init /usr/local/bin/zoo-init
 COPY zoo-doctor /usr/local/bin/zoo-doctor

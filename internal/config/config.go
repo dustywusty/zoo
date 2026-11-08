@@ -4,7 +4,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -32,6 +31,7 @@ type Harness struct {
 // Global is ~/.zoo/config.yaml.
 type Global struct {
 	Port          int                `yaml:"port"`
+	PreviewPort   *int               `yaml:"preview_port"` // nil = Port+2; 0 disables
 	DefaultSize   string             `yaml:"default_size"`
 	Sizes         map[string]Size    `yaml:"sizes"`
 	Masks         []string           `yaml:"masks"`
@@ -52,6 +52,44 @@ type Global struct {
 
 	// Services are things cages may be granted besides web hosts.
 	Services map[string]Service `yaml:"services"`
+
+	// Git is the default for what cages may do with .git: rw | ro | none.
+	Git string `yaml:"git"`
+
+	// Cache is the default package cache: project | shared | off.
+	Cache string `yaml:"cache"`
+
+	// Image and Dockerfile are the default for zoo.yaml's image: and
+	// dockerfile: (a cage built from your own image; see Project).
+	Image      string `yaml:"image"`
+	Dockerfile string `yaml:"dockerfile"`
+
+	// Credentials stay on the host; cages get a placeholder that the keeper
+	// swaps for the real value on the way to the credential's hosts.
+	Credentials map[string]Credential `yaml:"credentials"`
+}
+
+// Credential is a secret the keeper adds to requests for some hosts, plus
+// what those hosts may be asked to do. Cages only ever see a placeholder.
+type Credential struct {
+	Hosts  []string `yaml:"hosts" json:"hosts"`   // where the real value may go (exact names)
+	Secret string   `yaml:"secret" json:"secret"` // keychain item, bw:item[/field] or op://vault/item/field
+	// Env names variables that hold the placeholder in granted cages
+	// (GH_TOKEN, GITHUB_TOKEN, ...).
+	Env []string `yaml:"env" json:"env,omitempty"`
+	// Prefix goes in front of the placeholder, for tools that check a
+	// token's shape (e.g. "ghp_").
+	Prefix string `yaml:"prefix" json:"prefix,omitempty"`
+	// Git makes git in granted cages use the credential for https remotes on
+	// Hosts (user x-access-token), and fetch ssh remotes there over https.
+	Git bool `yaml:"git" json:"git,omitempty"`
+	// AllCages grants it to every cage (model keys for harnesses).
+	AllCages bool `yaml:"all_cages" json:"all_cages,omitempty"`
+
+	// Policy on Hosts, for every request (with or without the credential):
+	ReadOnly bool     `yaml:"readonly" json:"readonly,omitempty"` // only reads: GET/HEAD, GraphQL queries, git fetch
+	Push     []string `yaml:"push" json:"push,omitempty"`         // git push allowed to these branches ("agent/*"); implies nothing else
+	Repos    []string `yaml:"repos" json:"repos,omitempty"`       // owner/repo the API and git may touch (GitHub-style paths)
 }
 
 // Service is a host port, a sidecar, a remote TCP destination or an SSH
@@ -83,7 +121,16 @@ type Project struct {
 	Harness  string   `yaml:"harness"`
 	Mask     []string `yaml:"mask"`
 	Unmask   []string `yaml:"unmask"`
-	Services []string `yaml:"services"` // services granted to this repo's cage
+	Services []string `yaml:"services"` // services and credentials granted to this repo's cage
+	Git      string   `yaml:"git"`      // rw (default) | ro | none
+	Mounts   []string `yaml:"mounts"`   // further worktrees in the same cage (relative to this one, or ~/...)
+	Cache    string   `yaml:"cache"`    // package cache: project (default) | shared | off
+	// Image is a base image for this repo's cage (zoo adds its user and
+	// init on top). Dockerfile is a Dockerfile in the worktree to build that
+	// base from instead; it's built only once you approve its contents with
+	// `zoo build --project`, with an empty build context.
+	Image      string `yaml:"image"`
+	Dockerfile string `yaml:"dockerfile"`
 }
 
 func Defaults() Global {
@@ -106,9 +153,14 @@ func Defaults() Global {
 		BytesOutAlert: 5 << 20,
 		// Bump the tag when the images or the mounts they expect change:
 		// zoo rebuilds missing images and replaces instances on an old tag.
-		CageImage:      "zoo-cage:m3",
-		KeeperImage:    "zoo-keeper:m3",
-		Network:        "zoo-cages",
+		CageImage:   "zoo-cage:m4",
+		KeeperImage: "zoo-keeper:m4",
+		Network:     "zoo-cages",
+		Credentials: map[string]Credential{
+			// Used by harnesses whose env says "cred:claude" / "cred:codex".
+			"claude": {Hosts: []string{"api.anthropic.com"}, Secret: "claude", AllCages: true, Prefix: "sk-ant-oat01-"},
+			"codex":  {Hosts: []string{"api.openai.com"}, Secret: "codex", AllCages: true, Prefix: "sk-"},
+		},
 		Backend:        "auto",
 		IsolationFloor: "microvm",
 	}
@@ -135,6 +187,9 @@ func LoadGlobal() (Global, error) {
 func merge(g *Global, f Global) {
 	if f.Port != 0 {
 		g.Port = f.Port
+	}
+	if f.PreviewPort != nil {
+		g.PreviewPort = f.PreviewPort
 	}
 	if f.DefaultSize != "" {
 		g.DefaultSize = f.DefaultSize
@@ -172,6 +227,24 @@ func merge(g *Global, f Global) {
 	if f.IsolationFloor != "" {
 		g.IsolationFloor = f.IsolationFloor
 	}
+	if g.Credentials == nil {
+		g.Credentials = map[string]Credential{}
+	}
+	for k, v := range f.Credentials {
+		g.Credentials[k] = v
+	}
+	if f.Git != "" {
+		g.Git = f.Git
+	}
+	if f.Cache != "" {
+		g.Cache = f.Cache
+	}
+	if f.Image != "" {
+		g.Image = f.Image
+	}
+	if f.Dockerfile != "" {
+		g.Dockerfile = f.Dockerfile
+	}
 	if f.Docker.Bin != "" {
 		g.Docker.Bin = f.Docker.Bin
 	}
@@ -184,22 +257,6 @@ func merge(g *Global, f Global) {
 	for k, v := range f.Services {
 		g.Services[k] = v
 	}
-}
-
-// LoadProject reads <root>/zoo.yaml if present.
-func LoadProject(root string) (Project, error) {
-	var p Project
-	b, err := os.ReadFile(filepath.Join(root, "zoo.yaml"))
-	if os.IsNotExist(err) {
-		return p, nil
-	}
-	if err != nil {
-		return p, err
-	}
-	if err := yaml.Unmarshal(b, &p); err != nil {
-		return p, fmt.Errorf("zoo.yaml: %w", err)
-	}
-	return p, nil
 }
 
 // ResolveSize picks a size by name, or parses "cpus:memory" like "3:6G".
@@ -244,6 +301,7 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 #                            # "container" (shared kernel): set "container" to allow it
 # docker: { bin: docker, runtime: "" }   # runtime: runsc (gVisor) or kata for stronger isolation
 # port: 7777                 # dashboard, bound to 127.0.0.1 only
+# preview_port: 7779         # dev-server previews at http://<cage>.localhost:7779 (0 = off)
 # default_size: small
 # sizes:
 #   tiny:   { cpus: 1, memory: 1G, pids: 512 }
@@ -252,6 +310,16 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 #   large:  { cpus: 6, memory: 8G, pids: 4096 }
 # masks: [".env", ".env.*", "*.pem", "*.key", "*.p12", "id_rsa*", "id_ed25519*", ".npmrc", ".pypirc", ".netrc"]
 # unmask: [".env.example", ".env.sample", ".env.template", "*.pub"]
+# git: rw                   # what cages may do with .git: rw (commit; hooks/config read-only),
+#                            # ro (read history only) or none (no .git). zoo.yaml can set it per repo
+# cache: project             # package caches (npm, pnpm, yarn, pip, uv, go, cargo, bun) kept
+#                            # across zoo reset: project (one per cage), shared (one for every cage
+#                            # that picks it: less disk, but a compromised cage can poison packages
+#                            # the others install) or off. zoo.yaml can set it per repo
+# image: python:3.12-slim    # build cages from your own image instead of zoo's (zoo adds its
+#                            # agent user, init, bash/git/socat/curl; agent CLIs are yours to add)
+# dockerfile: .zoo/Dockerfile   # or from a Dockerfile in each worktree, built with an empty
+#                            # context once you approve it (zoo build --project). zoo.yaml wins
 # bytes_out_alert: 5242880   # alert when one cage sends this much to one host
 # ntfy_url: https://ntfy.sh/your-private-topic
 # services:                  # things cages can be granted (zoo grant <cage> <service>)
@@ -259,7 +327,20 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 #   redis:  { image: redis:7, port: 6379 }            # a sidecar zoo runs
 #   gh-ssh: { remote: github.com:22 }                 # non-HTTP egress
 #   keys:   { ssh-agent: bitwarden, keys: [github], hosts: [github.com] }
+# credentials:              # secrets that never enter a cage: cages get a placeholder and the
+#                            # keeper swaps in the real value for these hosts only (zoo grant)
+#   github:
+#     hosts: [github.com, api.github.com]
+#     secret: github-pat      # zoo keys set github-pat (a fine-grained token)
+#     env: [GH_TOKEN, GITHUB_TOKEN]
+#     git: true               # git over https uses it; ssh remotes are fetched over https
+#     readonly: true          # reads only: GET, GraphQL queries, git fetch...
+#     push: ["agent/*"]       # ...plus git push to these branches
+#     repos: [you/app]        # and only these repositories
 # harnesses:
+#   claude:                   # keep the model token in the keeper too:
+#     command: claude
+#     env: { CLAUDE_CODE_OAUTH_TOKEN: "cred:claude" }
 #   pi:
 #     command: pi
 #     env: { ANTHROPIC_API_KEY: anthropic }   # ENV_VAR: keychain item (zoo keys set anthropic)

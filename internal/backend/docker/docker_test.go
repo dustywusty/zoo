@@ -63,6 +63,29 @@ func TestIsolationFor(t *testing.T) {
 	}
 }
 
+func TestKeeperArgs(t *testing.T) {
+	got := strings.Join(KeeperArgs(backend.KeeperSpec{
+		ID: "zoo-keeper", Image: "zoo-keeper:1", CPUs: 1, Memory: "256M",
+		EtcDir: "/z/etc", LogDir: "/z/log", Labels: map[string]string{"zoo.role": "keeper"},
+	}), " ")
+	for _, want := range []string{
+		"create --name zoo-keeper", "--network " + EgressNetwork, "--cap-drop ALL", "--security-opt no-new-privileges",
+		// Reverse-path filtering drops forged cage source addresses in the kernel.
+		"--sysctl net.ipv4.conf.all.rp_filter=1", "--sysctl net.ipv4.conf.default.rp_filter=1",
+		"--label zoo.role=keeper", "--mount type=bind,source=/z/etc,target=/etc/zoo ",
+	} {
+		if !strings.Contains(got+" ", want) {
+			t.Errorf("missing %q in\n%s", want, got)
+		}
+	}
+	if !strings.HasSuffix(got, " zoo-keeper:1") {
+		t.Errorf("image must come last:\n%s", got)
+	}
+	if strings.Contains(got, "NET_ADMIN") {
+		t.Errorf("the keeper must not need NET_ADMIN for its sysctls:\n%s", got)
+	}
+}
+
 func TestRunArgs(t *testing.T) {
 	dir := t.TempDir()
 	root := filepath.Join(dir, "repo")

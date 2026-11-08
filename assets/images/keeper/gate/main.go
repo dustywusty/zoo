@@ -26,6 +26,12 @@ type service struct {
 	Kind   string            `json:"kind"`
 	Target string            `json:"target"`
 	Allow  map[string]string `json:"allow"`
+	// Via maps a cage IP to the keeper address that cage dials (the keeper's
+	// address on the cage's own network). A connection from that IP arriving
+	// on any other keeper address is refused: its source was forged from
+	// another network. A missing entry, or an old gate.json without via,
+	// means don't check.
+	Via map[string]string `json:"via,omitempty"`
 }
 
 type config struct {
@@ -42,8 +48,9 @@ type entry struct {
 	Target   string `json:"target"`
 	Verdict  string `json:"verdict"`
 	Reason   string `json:"reason,omitempty"`
-	BytesIn  int64  `json:"bytes_in"`  // to the cage
-	BytesOut int64  `json:"bytes_out"` // from the cage
+	Via      string `json:"via,omitempty"` // keeper address it arrived on, when that was wrong
+	BytesIn  int64  `json:"bytes_in"`      // to the cage
+	BytesOut int64  `json:"bytes_out"`     // from the cage
 	MS       int64  `json:"ms"`
 }
 
@@ -58,6 +65,8 @@ type gate struct {
 func main() {
 	confPath := flag.String("config", "/etc/zoo/gate.json", "gate config")
 	logPath := flag.String("log", "/var/log/zoo/gate.log", "connection log")
+	injectPath := flag.String("inject-config", "/etc/zoo/inject/inject.json", "credential injector config")
+	injectLog := flag.String("inject-log", "/var/log/zoo/inject.log", "credential injector log")
 	flag.Parse()
 
 	f, err := os.OpenFile(*logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -66,6 +75,7 @@ func main() {
 	}
 	g := &gate{listeners: map[int]net.Listener{}, logw: f}
 	g.cfg.Store(&config{})
+	go runInjector(g, *injectPath, *injectLog)
 	var lastMod time.Time
 	var lastSize int64 = -1
 	for {
@@ -161,6 +171,14 @@ func (g *gate) handle(conn net.Conn, port int) {
 		g.write(e)
 		return
 	}
+	if want := s.Via[client]; want != "" {
+		local, _, _ := net.SplitHostPort(conn.LocalAddr().String())
+		if !sameIP(local, want) {
+			e.Verdict, e.Reason, e.Via = "denied", "arrived on the wrong network", local
+			g.write(e)
+			return
+		}
+	}
 	up, err := g.dial(s, c, cage)
 	if err != nil {
 		e.Verdict, e.Reason, e.MS = "denied", err.Error(), time.Since(start).Milliseconds()
@@ -184,6 +202,13 @@ func (g *gate) handle(conn net.Conn, port int) {
 	wg.Wait()
 	e.MS = time.Since(start).Milliseconds()
 	g.write(e)
+}
+
+// sameIP compares parsed addresses, so an IPv4-mapped IPv6 local address
+// still matches its IPv4 form.
+func sameIP(a, b string) bool {
+	x, y := net.ParseIP(a), net.ParseIP(b)
+	return x != nil && y != nil && x.Equal(y)
 }
 
 func closeWrite(c net.Conn) {

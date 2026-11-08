@@ -1,0 +1,82 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: zoo
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: zoo
+    main: ./cmd/zoo
+    binary: zoo
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: zoo
+    formats: [tar.gz]
+    name_template: "zoo_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# Keyless cosign signature of checksums.txt (OIDC token from GitHub Actions).
+# Produces checksums.txt.sigstore.json (signature + certificate in one bundle).
+signs:
+  - id: cosign-checksums
+    cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - --yes
+      - --bundle=${signature}
+      - ${artifact}
+    output: true
+
+nfpms:
+  - id: zoo
+    package_name: zoo
+    homepage: https://github.com/dustywusty/zoo
+    maintainer: Dusty <dusty@copilotkit.ai>
+    description: |-
+      Run AI coding agents in sandboxed VMs and containers.
+      Requires a container runtime (Docker or Podman on Linux) to run cages.
+    vendor: zoo
+    formats: [deb, rpm]
+    bindir: /usr/bin
+    file_name_template: "zoo_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+brews:
+  - name: zoo
+    repository:
+      owner: dustywusty
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/dustywusty/zoo
+    description: Run AI coding agents in sandboxed VMs and containers
+    test: |
+      assert_match "zoo", shell_output("#{bin}/zoo version")
+
+release:
+  github:
+    owner: dustywusty
+    name: zoo
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

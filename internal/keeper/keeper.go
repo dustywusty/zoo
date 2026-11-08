@@ -81,6 +81,7 @@ acl zoo_private_name dstdomain -n .localhost .internal .local
 acl zoo_private dst 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3
 acl zoo_private dst ::1/128 64:ff9b::/96 fc00::/7 fe80::/10 ff00::/8
 
+%s
 http_access deny !Safe_ports
 http_access deny CONNECT !SSL_ports
 http_access deny zoo_private_name
@@ -94,12 +95,47 @@ cache_log /var/log/zoo/cache.log
 logfile_rotate 0
 `
 
+// injectBlock routes the CONNECTs of hosts with credentials or policies to
+// the injector in the keeper (zoo-gate, 127.0.0.1:3129) instead of straight
+// out. The allowlist and private-address rules above still decide first.
+const injectBlock = `# Credential hosts (zoo credentials): squid hands their CONNECTs to the
+# keeper's injector, which swaps placeholders and enforces policy.
+acl zoo_inject_hosts dstdomain -n "/etc/zoo/inject-hosts.txt"
+cache_peer 127.0.0.1 parent 3129 0 no-query no-digest no-netdb-exchange name=zoo_inject
+cache_peer_access zoo_inject allow zoo_inject_hosts
+cache_peer_access zoo_inject deny all
+never_direct allow zoo_inject_hosts
+`
+
+// RenderSquid returns squid.conf, with the injector route when inject is on.
+func RenderSquid(inject bool) string {
+	block := ""
+	if inject {
+		block = injectBlock
+	}
+	return fmt.Sprintf(squidConf, Port, block)
+}
+
+// WriteSquid writes squid.conf; reports whether it changed.
+func WriteSquid(inject bool) (bool, error) {
+	b := []byte(RenderSquid(inject))
+	if old, err := os.ReadFile(paths.SquidConf()); err == nil && string(old) == string(b) {
+		return false, nil
+	}
+	return true, os.WriteFile(paths.SquidConf(), b, 0o644)
+}
+
 // EnsureFiles writes squid.conf, and the allowlist and gate config if missing.
 func EnsureFiles() error {
 	if err := paths.Ensure(); err != nil {
 		return err
 	}
-	if err := os.WriteFile(paths.SquidConf(), []byte(fmt.Sprintf(squidConf, Port)), 0o644); err != nil {
+	if _, err := os.Stat(paths.InjectHosts()); os.IsNotExist(err) {
+		if err := os.WriteFile(paths.InjectHosts(), []byte("\n"), 0o644); err != nil {
+			return err
+		}
+	}
+	if _, err := WriteSquid(injectOn()); err != nil {
 		return err
 	}
 	if _, err := os.Stat(paths.Allowlist()); os.IsNotExist(err) {
@@ -118,6 +154,12 @@ func EnsureFiles() error {
 		_ = os.Remove(filepath.Join(paths.KeeperEtc(), f))
 	}
 	return nil
+}
+
+// injectOn reports whether any host is routed to the injector.
+func injectOn() bool {
+	b, err := os.ReadFile(paths.InjectHosts())
+	return err == nil && len(strings.TrimSpace(string(b))) > 0
 }
 
 // --- allowlist ---------------------------------------------------------------
@@ -224,7 +266,17 @@ func Deny(hosts ...string) ([]string, error) {
 		}
 		kept = append(kept, l)
 	}
-	return removed, os.WriteFile(paths.Allowlist(), []byte(strings.Join(kept, "\n")+"\n"), 0o644)
+	if err := os.WriteFile(paths.Allowlist(), []byte(strings.Join(kept, "\n")+"\n"), 0o644); err != nil {
+		return removed, err
+	}
+	if len(removed) > 0 {
+		exp := LoadExpiries()
+		for _, h := range removed {
+			delete(exp, h)
+		}
+		return removed, exp.Save()
+	}
+	return removed, nil
 }
 
 func prune(lines []string) []string {

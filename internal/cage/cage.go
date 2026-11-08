@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/dusty/zoo/internal/backend"
 	"github.com/dusty/zoo/internal/config"
 	"github.com/dusty/zoo/internal/keeper"
+	"github.com/dusty/zoo/internal/paths"
 )
 
 const Prefix = "zoo-"
@@ -33,6 +35,8 @@ const (
 	LabelIso      = "zoo.isolation"
 	LabelWeaker   = "zoo.weaker-isolation" // set when started below the isolation floor
 	LabelImage    = "zoo.image"            // image the cage was created from
+	LabelMounts   = "zoo.mounts"           // JSON list of further worktrees mounted (zoo.yaml mounts:)
+	LabelLayout   = "zoo.layout"           // hash of mounts and guards; a change needs a new cage
 )
 
 // Plan is everything needed to create a cage for one worktree.
@@ -40,14 +44,25 @@ type Plan struct {
 	Name     string   // short name, e.g. api-3fa2c1
 	ID       string   // container id, e.g. zoo-api-3fa2c1
 	Root     string   // worktree root on the host (and in the guest)
+	Extra    []string // further worktrees mounted rw at the same path (zoo.yaml mounts:)
 	ExtraRW  []string // other host paths mounted rw (a worktree's main .git)
 	Masks    []string // secret files hidden inside the cage
 	ReadOnly []string // paths made read-only inside the cage
 	Pin      []string // directories mounted onto themselves so they can't be renamed
 	ReopenRW []string // dirs inside a read-only dir made writable again (this worktree's gitdir)
-	SizeName string
-	Size     config.Size
+	// ExtraMounts are further mounts: a git dir outside the worktree shown
+	// read-only (git: ro), or an empty directory over one (git: none).
+	ExtraMounts []backend.Mount
+	Git         string // rw | ro | none
+	Cache       string // project | shared | off
+	CacheDir    string // host dir mounted at CacheTarget ("" for off)
+	Image       string // image to create the cage from ("" = g.CageImage)
+	SizeName    string
+	Size        config.Size
 }
+
+// Roots is every worktree in the plan: the main one, then zoo.yaml mounts.
+func (pl Plan) Roots() []string { return append([]string{pl.Root}, pl.Extra...) }
 
 // Root returns the git toplevel for dir, or dir itself outside a repo.
 func Root(dir string) (string, error) {
@@ -131,6 +146,106 @@ func within(path, dir string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
 }
 
+// Git modes: what a cage can do with the repository's .git.
+const (
+	GitRW   = "rw"   // commit, branch, rebase (default); hooks and config stay read-only
+	GitRO   = "ro"   // read history, can't change anything in .git
+	GitNone = "none" // no .git in the cage at all
+)
+
+// GitMode resolves zoo.yaml's git: over the global default.
+func GitMode(g config.Global, p config.Project) (string, error) {
+	m := strings.ToLower(strings.TrimSpace(p.Git))
+	if m == "" {
+		m = strings.ToLower(strings.TrimSpace(g.Git))
+	}
+	switch m {
+	case "", GitRW:
+		return GitRW, nil
+	case GitRO, GitNone:
+		return m, nil
+	}
+	return "", fmt.Errorf("git: %q isn't a mode (rw, ro, none)", m)
+}
+
+// guardGit adds the mounts that keep one repository's .git from running
+// anything on the host. root is a worktree mounted rw in the cage.
+func (pl *Plan) guardGit(root, mode string) {
+	common, gitDir := gitPaths(root)
+	if common == "" {
+		return
+	}
+	outside := !within(common, root)
+	switch mode {
+	case GitNone:
+		// An empty read-only directory over the git dir; a linked
+		// worktree's .git file reads as empty. A git dir outside the
+		// worktree isn't mounted at all.
+		if !outside {
+			pl.ExtraMounts = append(pl.ExtraMounts, backend.Mount{Source: paths.EmptyDir(), Target: common, ReadOnly: true})
+		}
+		if gitDir != common {
+			pl.Masks = append(pl.Masks, filepath.Join(root, ".git"))
+		}
+		return
+	case GitRO:
+		if outside {
+			pl.ExtraMounts = append(pl.ExtraMounts, backend.Mount{Source: common, Target: common, ReadOnly: true})
+		} else {
+			pl.ReadOnly = append(pl.ReadOnly, common)
+		}
+		if gitDir != common {
+			pl.ReadOnly = append(pl.ReadOnly, filepath.Join(root, ".git"))
+		}
+		pl.ReadOnly = append(pl.ReadOnly, WritableGitPaths(root)...)
+		return
+	}
+	if outside {
+		pl.ExtraRW = append(pl.ExtraRW, common)
+	}
+	// Everything under the common dir that decides what the host's git
+	// runs, for this worktree or any other:
+	//   hooks/, config      this repo
+	//   worktrees/          every linked worktree's commondir and
+	//                       config.worktree: rewriting another worktree's
+	//                       commondir points the host's git at a config
+	//                       the agent wrote
+	//   modules/            submodules' own config and hooks
+	// Make sure the dirs exist so the agent can't create them.
+	for _, d := range []string{"hooks", "worktrees", "modules"} {
+		_ = os.MkdirAll(filepath.Join(common, d), 0o755)
+	}
+	pl.ReadOnly = append(pl.ReadOnly,
+		filepath.Join(common, "hooks"), filepath.Join(common, "config"),
+		filepath.Join(common, "worktrees"), filepath.Join(common, "modules"))
+	if gitDir != "" && gitDir != common {
+		// A linked worktree: its own gitdir (HEAD, index) lives under
+		// worktrees/ and must stay writable, but its .git file and gitdir
+		// pointers decide which config the host's git reads.
+		if within(gitDir, filepath.Join(common, "worktrees")) {
+			pl.ReopenRW = append(pl.ReopenRW, gitDir)
+		}
+		// A linked worktree keeps its submodules' git dirs in its own
+		// gitdir, not the common one.
+		_ = os.MkdirAll(filepath.Join(gitDir, "modules"), 0o755)
+		pl.ReadOnly = append(pl.ReadOnly,
+			filepath.Join(gitDir, "modules"),
+			filepath.Join(root, ".git"),
+			filepath.Join(gitDir, "config.worktree"),
+			filepath.Join(gitDir, "commondir"))
+		// Absent, the agent could create it in its writable gitdir and
+		// the host's git would read it once extensions.worktreeConfig is
+		// on. An empty one changes nothing and can be mounted read-only.
+		if cw := filepath.Join(gitDir, "config.worktree"); !exists(cw) {
+			_ = os.WriteFile(cw, nil, 0o644)
+		}
+	}
+	// Hooks dirs, included config and filter scripts that git config points
+	// at inside the worktree would run on the host after the agent edits
+	// them (core.hooksPath=.husky is the common case).
+	pl.ReadOnly = append(pl.ReadOnly, WritableGitPaths(root)...)
+}
+
 // NewPlan builds the plan for a worktree.
 func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (Plan, error) {
 	sizeName := sizeFlag
@@ -144,47 +259,28 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 	name := NameFor(root)
 	pl := Plan{Name: name, ID: Prefix + name, Root: root, SizeName: sn, Size: size}
 
-	common, gitDir := gitPaths(root)
-	if common != "" {
-		if !within(common, root) {
-			pl.ExtraRW = append(pl.ExtraRW, common)
+	mode, err := GitMode(g, p)
+	if err != nil {
+		return Plan{}, err
+	}
+	pl.Git = mode
+	pl.guardGit(root, mode)
+	if pl.Cache, err = CacheMode(g, p); err != nil {
+		return Plan{}, err
+	}
+	if pl.CacheDir = CacheDir(pl.Cache, name); pl.CacheDir != "" {
+		if err := EnsureCacheDir(pl.CacheDir); err != nil {
+			return Plan{}, fmt.Errorf("package cache: %w", err)
 		}
-		// Everything under the common dir that decides what the host's git
-		// runs, for this worktree or any other:
-		//   hooks/, config      this repo
-		//   worktrees/          every linked worktree's commondir and
-		//                       config.worktree: rewriting another worktree's
-		//                       commondir points the host's git at a config
-		//                       the agent wrote
-		//   modules/            submodules' own config and hooks
-		// Make sure the dirs exist so the agent can't create them.
-		for _, d := range []string{"hooks", "worktrees", "modules"} {
-			_ = os.MkdirAll(filepath.Join(common, d), 0o755)
-		}
-		pl.ReadOnly = append(pl.ReadOnly,
-			filepath.Join(common, "hooks"), filepath.Join(common, "config"),
-			filepath.Join(common, "worktrees"), filepath.Join(common, "modules"))
-		if gitDir != "" && gitDir != common {
-			// A linked worktree: its own gitdir (HEAD, index) lives under
-			// worktrees/ and must stay writable, but its .git file and gitdir
-			// pointers decide which config the host's git reads.
-			if within(gitDir, filepath.Join(common, "worktrees")) {
-				pl.ReopenRW = append(pl.ReopenRW, gitDir)
-			}
-			// A linked worktree keeps its submodules' git dirs in its own
-			// gitdir, not the common one.
-			_ = os.MkdirAll(filepath.Join(gitDir, "modules"), 0o755)
-			pl.ReadOnly = append(pl.ReadOnly,
-				filepath.Join(gitDir, "modules"),
-				filepath.Join(root, ".git"),
-				filepath.Join(gitDir, "config.worktree"),
-				filepath.Join(gitDir, "commondir"))
-			// Absent, the agent could create it in its writable gitdir and
-			// the host's git would read it once extensions.worktreeConfig is
-			// on. An empty one changes nothing and can be mounted read-only.
-			if cw := filepath.Join(gitDir, "config.worktree"); !exists(cw) {
-				_ = os.WriteFile(cw, nil, 0o644)
-			}
+	}
+	extra, err := ResolveMounts(root, p.Mounts)
+	if err != nil {
+		return Plan{}, err
+	}
+	for _, m := range extra {
+		pl.Extra = append(pl.Extra, m)
+		if top, err := Root(m); err == nil && top == m {
+			pl.guardGit(m, mode)
 		}
 	}
 	// A directory already mounted (read-only or reopened) can't be renamed
@@ -193,13 +289,17 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 	for _, p := range append(append([]string{}, pl.ReadOnly...), pl.ReopenRW...) {
 		mounted[p] = true
 	}
-	for _, d := range pinsFor(pl.ReadOnly, append([]string{root}, pl.ExtraRW...)) {
+	for _, d := range pinsFor(pl.ReadOnly, append(append([]string{root}, pl.Extra...), pl.ExtraRW...)) {
 		if !mounted[d] {
 			pl.Pin = append(pl.Pin, d)
 		}
 	}
 
-	pl.Masks = FindMasks(root, append(append([]string{}, g.Masks...), p.Mask...), append(append([]string{}, g.Unmask...), p.Unmask...))
+	masks := append(append([]string{}, g.Masks...), p.Mask...)
+	unmask := append(append([]string{}, g.Unmask...), p.Unmask...)
+	for _, r := range append([]string{root}, pl.Extra...) {
+		pl.Masks = append(pl.Masks, FindMasks(r, masks, unmask)...)
+	}
 	return pl, nil
 }
 
@@ -273,24 +373,40 @@ func ProxyEnv(keeperIP string) []string {
 
 // Spec is the backend's view of a plan.
 func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) backend.CageSpec {
+	image := g.CageImage
+	if pl.Image != "" {
+		image = pl.Image
+	}
 	l := map[string]string{
 		LabelCage:     pl.Name,
 		LabelWorktree: pl.Root,
 		LabelSize:     pl.SizeName,
 		LabelCPUs:     fmt.Sprint(pl.Size.CPUs),
 		LabelMemory:   pl.Size.Memory,
-		LabelImage:    g.CageImage,
+		LabelImage:    image,
+	}
+	if len(pl.Extra) > 0 {
+		b, _ := json.Marshal(pl.Extra)
+		l[LabelMounts] = string(b)
 	}
 	for k, v := range labels {
 		l[k] = v
 	}
 	mounts := []backend.Mount{{Source: pl.Root, Target: pl.Root}}
+	for _, p := range pl.Extra {
+		mounts = append(mounts, backend.Mount{Source: p, Target: p})
+	}
 	for _, p := range pl.ExtraRW {
 		mounts = append(mounts, backend.Mount{Source: p, Target: p})
 	}
-	return backend.CageSpec{
+	mounts = append(mounts, pl.ExtraMounts...)
+	mounts = append(mounts, pl.cacheMount()...)
+	if pl.CacheDir != "" {
+		l[LabelCache] = pl.Cache
+	}
+	spec := backend.CageSpec{
 		ID:       pl.ID,
-		Image:    g.CageImage,
+		Image:    image,
 		CPUs:     pl.Size.CPUs,
 		Memory:   pl.Size.Memory,
 		Pids:     pl.Size.Pids,
@@ -302,12 +418,41 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 		Pin:      pl.Pin,
 		ReopenRW: pl.ReopenRW,
 	}
+	spec.Labels[LabelLayout] = Layout(spec)
+	return spec
+}
+
+// Layout fingerprints what a cage can't change while it exists: its mounts
+// and guards. Masks are left out (they're fixed at creation by design).
+func Layout(spec backend.CageSpec) string {
+	h := sha1.New()
+	for _, m := range spec.Mounts {
+		fmt.Fprintf(h, "m %s %s %v\n", m.Source, m.Target, m.ReadOnly)
+	}
+	for _, list := range [][]string{spec.ReadOnly, spec.Pin, spec.ReopenRW} {
+		for _, p := range list {
+			fmt.Fprintf(h, "p %s\n", p)
+		}
+		fmt.Fprintln(h, "--")
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
+}
+
+// Changed reports why an existing cage no longer matches the spec, or "".
+func Changed(st backend.Status, spec backend.CageSpec) string {
+	switch {
+	case st.Labels[LabelImage] != spec.Image:
+		return "image"
+	case st.Labels[LabelLayout] != "" && st.Labels[LabelLayout] != spec.Labels[LabelLayout]:
+		return "layout"
+	}
+	return ""
 }
 
 // Stale reports whether an existing cage predates the current image (and so
 // may lack the mounts this zoo relies on, e.g. v0 cages' guard).
 func Stale(st backend.Status, spec backend.CageSpec) bool {
-	return st.Labels[LabelImage] != spec.Image
+	return Changed(st, spec) != ""
 }
 
 // Ensure creates or starts the cage. Returns true if it was (re)created.
@@ -351,18 +496,27 @@ func waitRunning(ctx context.Context, b backend.Backend, id string) error {
 
 // Info is a cage as listed for humans and the dashboard.
 type Info struct {
-	Name      string `json:"name"`
-	ID        string `json:"id"`
-	Worktree  string `json:"worktree"`
-	Size      string `json:"size"`
-	CPUs      string `json:"cpus"`
-	Memory    string `json:"memory"`
-	Status    string `json:"status"`
-	Running   bool   `json:"running"`
-	IP        string `json:"ip"`
-	Isolation string `json:"isolation"`
-	Weaker    bool   `json:"weaker_isolation"` // started below the isolation floor
-	Network   string `json:"network"`
+	Name      string   `json:"name"`
+	ID        string   `json:"id"`
+	Worktree  string   `json:"worktree"`
+	Size      string   `json:"size"`
+	CPUs      string   `json:"cpus"`
+	Memory    string   `json:"memory"`
+	Status    string   `json:"status"`
+	Running   bool     `json:"running"`
+	IP        string   `json:"ip"`
+	Isolation string   `json:"isolation"`
+	Weaker    bool     `json:"weaker_isolation"` // started below the isolation floor
+	Network   string   `json:"network"`
+	Mounts    []string `json:"mounts,omitempty"` // further worktrees (zoo.yaml mounts:)
+}
+
+// Roots is every worktree mounted in the cage: the main one, then the rest.
+func (c Info) Roots() []string {
+	if c.Worktree == "" {
+		return c.Mounts
+	}
+	return append([]string{c.Worktree}, c.Mounts...)
 }
 
 // List returns all zoo cages.
@@ -389,8 +543,13 @@ func List(ctx context.Context, b backend.Backend) ([]Info, error) {
 			}
 			name = strings.TrimPrefix(c.ID, Prefix)
 		}
+		var extra []string
+		if m := c.Labels[LabelMounts]; m != "" {
+			_ = json.Unmarshal([]byte(m), &extra)
+		}
 		out = append(out, Info{
-			Name: name, ID: c.ID, Worktree: c.Labels[LabelWorktree],
+			Mounts: extra,
+			Name:   name, ID: c.ID, Worktree: c.Labels[LabelWorktree],
 			Size: c.Labels[LabelSize], CPUs: c.Labels[LabelCPUs], Memory: c.Labels[LabelMemory],
 			Status: c.State, Running: c.Running, IP: c.IP,
 			Isolation: c.Labels[LabelIso], Weaker: c.Labels[LabelWeaker] == "1",

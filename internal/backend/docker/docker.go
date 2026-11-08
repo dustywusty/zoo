@@ -273,26 +273,7 @@ func (d *Docker) EnsureKeeper(ctx context.Context, s backend.KeeperSpec) (string
 		}
 	}
 	if !exists {
-		args := []string{"create", "--name", s.ID,
-			"--network", EgressNetwork,
-			// Where zood's host bridge is (Linux needs this mapping; Desktop
-			// and OrbStack provide it anyway).
-			"--add-host", "host.docker.internal:host-gateway",
-			"--cpus", fmt.Sprint(s.CPUs), "--memory", s.Memory,
-			"--pids-limit", "512",
-			// squid starts as root to set up its dirs, then runs as "proxy".
-			"--cap-drop", "ALL",
-			"--cap-add", "CHOWN", "--cap-add", "SETUID", "--cap-add", "SETGID",
-			"--cap-add", "DAC_OVERRIDE", "--cap-add", "FOWNER",
-			"--security-opt", "no-new-privileges",
-			"--restart", "unless-stopped",
-		}
-		args = append(args, labelArgs(s.Labels)...)
-		args = append(args,
-			"--mount", mountArg(s.EtcDir, "/etc/zoo", false),
-			"--mount", mountArg(s.LogDir, "/var/log/zoo", false),
-			s.Image)
-		if _, err := d.cli.Run(ctx, args...); err != nil {
+		if _, err := d.cli.Run(ctx, KeeperArgs(s)...); err != nil {
 			return "", fmt.Errorf("create keeper: %w", err)
 		}
 		nets := []string{d.network, backend.ServicesNetwork}
@@ -328,6 +309,37 @@ func (d *Docker) EnsureKeeper(ctx context.Context, s backend.KeeperSpec) (string
 		time.Sleep(500 * time.Millisecond)
 	}
 	return "", lastErr
+}
+
+// KeeperArgs is the `docker create` invocation for the keeper.
+func KeeperArgs(s backend.KeeperSpec) []string {
+	args := []string{"create", "--name", s.ID,
+		"--network", EgressNetwork,
+		// Where zood's host bridge is (Linux needs this mapping; Desktop
+		// and OrbStack provide it anyway).
+		"--add-host", "host.docker.internal:host-gateway",
+		"--cpus", fmt.Sprint(s.CPUs), "--memory", s.Memory,
+		"--pids-limit", "512",
+		// squid starts as root to set up its dirs, then runs as "proxy".
+		"--cap-drop", "ALL",
+		"--cap-add", "CHOWN", "--cap-add", "SETUID", "--cap-add", "SETGID",
+		"--cap-add", "DAC_OVERRIDE", "--cap-add", "FOWNER",
+		"--security-opt", "no-new-privileges",
+		// Strict reverse-path filtering in the keeper's own network namespace:
+		// a packet whose source address belongs to another cage's network is
+		// dropped by the kernel when it arrives on the wrong interface, before
+		// the gate (which authorizes by source IP) sees it. "default" covers
+		// cage networks attached later with `network connect`. Namespaced
+		// sysctls set by the runtime: no capability needed in the keeper.
+		"--sysctl", "net.ipv4.conf.all.rp_filter=1",
+		"--sysctl", "net.ipv4.conf.default.rp_filter=1",
+		"--restart", "unless-stopped",
+	}
+	args = append(args, labelArgs(s.Labels)...)
+	return append(args,
+		"--mount", mountArg(s.EtcDir, "/etc/zoo", false),
+		"--mount", mountArg(s.LogDir, "/var/log/zoo", false),
+		s.Image)
 }
 
 // RunArgs is the `docker run` invocation for a cage.

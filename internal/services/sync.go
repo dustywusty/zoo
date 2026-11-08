@@ -48,7 +48,21 @@ func GrantsFor(g config.Global, cages []cage.Info) map[string][]string {
 				repo = p.Services
 			}
 		}
-		out[c.Name] = Effective(g.Services, explicit, c.Name, repo)
+		out[c.Name] = Effective(Grantable(g), explicit, c.Name, repo)
+	}
+	return out
+}
+
+// Grantable is every name a cage can be granted: services and credentials.
+func Grantable(g config.Global) map[string]config.Service {
+	out := make(map[string]config.Service, len(g.Services)+len(g.Credentials))
+	for k, v := range g.Services {
+		out[k] = v
+	}
+	for k := range g.Credentials {
+		if _, dup := out[k]; !dup {
+			out[k] = config.Service{}
+		}
 	}
 	return out
 }
@@ -61,12 +75,16 @@ func Sync(ctx context.Context, b backend.Backend, g config.Global, cages []cage.
 	}
 	grants := GrantsFor(g, cages)
 	wanted := map[string]bool{}
+	var keeperIPs map[string]string
+	if k, ok, _ := b.Get(ctx, backend.KeeperID); ok {
+		keeperIPs = k.IPs
+	}
 	var refs []CageRef
 	for _, c := range cages {
 		if !c.Running {
 			continue
 		}
-		refs = append(refs, CageRef{Name: c.Name, IP: c.IP, Grants: grants[c.Name]})
+		refs = append(refs, CageRef{Name: c.Name, IP: c.IP, Grants: grants[c.Name], Via: keeperIPs[c.Network]})
 		for _, s := range grants[c.Name] {
 			wanted[s] = true
 		}
