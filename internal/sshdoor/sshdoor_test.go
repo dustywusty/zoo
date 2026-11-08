@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -102,7 +103,7 @@ func TestEnsureClientKey(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if st.Mode().Perm() != mode {
+		if runtime.GOOS != "windows" && st.Mode().Perm() != mode { // no Unix modes on Windows
 			t.Errorf("%s mode %v, want %v", p, st.Mode().Perm(), mode)
 		}
 	}

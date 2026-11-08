@@ -333,6 +333,14 @@ func (a *Apple) RunArgs(s backend.CageSpec) ([]string, error) {
 			return nil, err
 		}
 	}
+	for _, f := range s.Files {
+		if _, err := os.Stat(f.Source); err != nil {
+			continue
+		}
+		if err := vol(f.Source, f.Target, true); err != nil {
+			return nil, err
+		}
+	}
 	if masks := backend.Existing(s.Masks); len(masks) > 0 {
 		if a.maskFile == "" {
 			return nil, fmt.Errorf("apple backend needs a mask file to hide %d secret file(s)", len(masks))

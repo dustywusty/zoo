@@ -40,6 +40,7 @@ type Docker struct {
 	network  string
 	runtime  string
 	maskFile string
+	a        apiState // engine API for reads, found lazily (api.go)
 }
 
 // New builds the backend. Bin defaults to $ZOO_DOCKER_BIN, then the backend name.
@@ -86,22 +87,30 @@ func (d *Docker) Detect(ctx context.Context) backend.Info {
 	} else {
 		info.Hint = "install OrbStack, Docker Desktop, colima, or Docker Engine"
 	}
-	if !d.cli.Installed() {
-		return info
-	}
-	info.Installed = true
-	out, err := d.cli.Run(ctx, "info", "--format", "{{json .}}")
-	if err != nil {
-		if d.name == "podman" {
-			info.Hint = "start it: `podman machine start` (macOS) or check `podman info`"
-		} else {
-			info.Hint = "start your Docker runtime (OrbStack, Docker Desktop, `colima start`, or the docker service)"
-		}
-		return info
-	}
-	info.Running, info.Hint = true, ""
 	var v any
-	_ = json.Unmarshal([]byte(out), &v)
+	if c := d.api(ctx); c != nil {
+		m, err := c.Info(ctx)
+		if err == nil {
+			info.Installed, info.Running, info.Hint, v = true, true, "", m
+		}
+	}
+	if v == nil {
+		if !d.cli.Installed() {
+			return info
+		}
+		info.Installed = true
+		out, err := d.cli.Run(ctx, "info", "--format", "{{json .}}")
+		if err != nil {
+			if d.name == "podman" {
+				info.Hint = "start it: `podman machine start` (macOS) or check `podman info`"
+			} else {
+				info.Hint = "start your Docker runtime (OrbStack, Docker Desktop, `colima start`, or the docker service)"
+			}
+			return info
+		}
+		info.Running, info.Hint = true, ""
+		_ = json.Unmarshal([]byte(out), &v)
+	}
 	// docker: ServerVersion, OperatingSystem, DefaultRuntime. podman: version.Version, host.ociRuntime.name.
 	info.Version = jsonx.String(v, "ServerVersion")
 	if info.Version == "" {
@@ -129,6 +138,9 @@ func (d *Docker) Detect(ctx context.Context) backend.Info {
 }
 
 func (d *Docker) Prepare(ctx context.Context) error {
+	if d.api(ctx) != nil {
+		return nil
+	}
 	if d.cli.OK(ctx, "info") {
 		return nil
 	}
@@ -369,12 +381,15 @@ func (d *Docker) RunArgs(s backend.CageSpec) []string {
 	}
 	// Tell zoo-init (and zoo doctor) the guard is applied from outside.
 	args = append(args, "--env", "ZOO_GUARD=host")
+	// Targets are guest paths: the host path itself on Unix, /c/... for
+	// C:\... on Windows (see backend.GuestPath).
+	g := backend.GuestPath
 	for _, m := range s.Mounts {
-		args = append(args, "--mount", mountArg(m.Source, m.Target, m.ReadOnly))
+		args = append(args, "--mount", mountArg(m.Source, g(m.Target), m.ReadOnly))
 	}
 	for _, p := range s.Pin {
 		if exists(p) {
-			args = append(args, "--mount", mountArg(p, p, false))
+			args = append(args, "--mount", mountArg(p, g(p), false))
 		}
 	}
 	// Read-only dirs, dirs reopened rw inside them, then read-only files
@@ -382,22 +397,27 @@ func (d *Docker) RunArgs(s backend.CageSpec) []string {
 	// depth anyway; the argument order matches it for runtimes that don't.
 	for _, p := range s.ReadOnly {
 		if isDir(p) {
-			args = append(args, "--mount", mountArg(p, p, true))
+			args = append(args, "--mount", mountArg(p, g(p), true))
 		}
 	}
 	for _, p := range s.ReopenRW {
 		if exists(p) {
-			args = append(args, "--mount", mountArg(p, p, false))
+			args = append(args, "--mount", mountArg(p, g(p), false))
 		}
 	}
 	for _, p := range s.ReadOnly {
 		if exists(p) && !isDir(p) {
-			args = append(args, "--mount", mountArg(p, p, true))
+			args = append(args, "--mount", mountArg(p, g(p), true))
+		}
+	}
+	for _, f := range s.Files {
+		if exists(f.Source) {
+			args = append(args, "--mount", mountArg(f.Source, g(f.Target), true))
 		}
 	}
 	for _, p := range s.Masks {
 		if exists(p) {
-			args = append(args, "--mount", mountArg(d.maskFile, p, true))
+			args = append(args, "--mount", mountArg(d.maskFile, g(p), true))
 		}
 	}
 	return append(args, s.Image)
@@ -515,6 +535,9 @@ func (d *Docker) inspect(ctx context.Context, ids ...string) ([]backend.Status, 
 }
 
 func (d *Docker) List(ctx context.Context) ([]backend.Status, error) {
+	if c := d.api(ctx); c != nil {
+		return d.listAPI(ctx, c)
+	}
 	out, err := d.cli.Run(ctx, "ps", "-a", "-q", "--filter", "name=zoo-")
 	if err != nil {
 		return nil, err
@@ -537,6 +560,9 @@ func (d *Docker) List(ctx context.Context) ([]backend.Status, error) {
 }
 
 func (d *Docker) Get(ctx context.Context, id string) (backend.Status, bool, error) {
+	if c := d.api(ctx); c != nil {
+		return d.getAPI(ctx, c, id)
+	}
 	res, err := d.inspect(ctx, id)
 	if len(res) == 1 && res[0].ID == id {
 		return res[0], true, nil
@@ -590,6 +616,9 @@ func (d *Docker) HostBridge(ctx context.Context) (string, string, error) {
 	if d.name == "podman" {
 		return "127.0.0.1", "host.containers.internal", nil
 	}
+	if c := d.api(ctx); c != nil {
+		return d.hostBridgeAPI(ctx, c)
+	}
 	osName, _ := d.cli.Run(ctx, "info", "--format", "{{.OperatingSystem}}")
 	if strings.Contains(osName, "OrbStack") || strings.Contains(osName, "Docker Desktop") {
 		return "127.0.0.1", "host.docker.internal", nil
@@ -610,6 +639,9 @@ func (d *Docker) Exec(ctx context.Context, s backend.ExecSpec) (int, error) {
 }
 
 func (d *Docker) Sample(ctx context.Context) ([]backend.Sample, error) {
+	if c := d.api(ctx); c != nil {
+		return d.sampleAPI(ctx, c)
+	}
 	out, err := d.cli.Run(ctx, "stats", "--no-stream", "--format", "{{json .}}")
 	if err != nil {
 		return nil, err

@@ -10,8 +10,10 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"github.com/dusty/zoo/internal/config"
 	"github.com/dusty/zoo/internal/keeper"
 	"github.com/dusty/zoo/internal/paths"
+	"github.com/dusty/zoo/internal/proc"
 )
 
 const Prefix = "zoo-"
@@ -37,6 +40,7 @@ const (
 	LabelImage    = "zoo.image"            // image the cage was created from
 	LabelMounts   = "zoo.mounts"           // JSON list of further worktrees mounted (zoo.yaml mounts:)
 	LabelLayout   = "zoo.layout"           // hash of mounts and guards; a change needs a new cage
+	LabelMasks    = "zoo.masks"            // fingerprint of the masked files: secrets added later mean a stale cage
 )
 
 // Plan is everything needed to create a cage for one worktree.
@@ -57,8 +61,14 @@ type Plan struct {
 	Cache       string // project | shared | off
 	CacheDir    string // host dir mounted at CacheTarget ("" for off)
 	Image       string // image to create the cage from ("" = g.CageImage)
-	SizeName    string
-	Size        config.Size
+	// Files are read-only files shown with rewritten content (git
+	// pointers, where the guest spells host paths differently: Windows).
+	Files []backend.Mount
+	// AutoCRLF is the host's core.autocrlf, mirrored into the cage when
+	// paths differ (Windows).
+	AutoCRLF string
+	SizeName string
+	Size     config.Size
 }
 
 // Roots is every worktree in the plan: the main one, then zoo.yaml mounts.
@@ -70,10 +80,14 @@ func Root(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out, err := exec.Command("git", "-C", abs, "rev-parse", "--show-toplevel").Output()
+	cmd := exec.Command("git", "-C", abs, "rev-parse", "--show-toplevel")
+	proc.Quiet(cmd)
+	out, err := cmd.Output()
 	if err == nil {
 		if top := strings.TrimSpace(string(out)); top != "" {
-			return top, nil
+			// Git for Windows answers C:/Users/...; keep one spelling so the
+			// cage name (a hash of the path) is stable.
+			return filepath.Clean(top), nil
 		}
 	}
 	return abs, nil
@@ -97,7 +111,9 @@ func NameFor(root string) string {
 
 // gitPaths returns the common .git dir and this worktree's git dir (absolute).
 func gitPaths(root string) (common, gitDir string) {
-	out, err := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir").Output()
+	cmd := exec.Command("git", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir")
+	proc.Quiet(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return "", ""
 	}
@@ -141,9 +157,11 @@ func exists(p string) bool {
 	return err == nil
 }
 
+// within reports whether path is dir or inside it. Rel's ".." uses the OS
+// separator (..\ on Windows), and paths on different drives don't relate.
 func within(path, dir string) bool {
 	rel, err := filepath.Rel(dir, path)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // Git modes: what a cage can do with the repository's .git.
@@ -170,10 +188,10 @@ func GitMode(g config.Global, p config.Project) (string, error) {
 
 // guardGit adds the mounts that keep one repository's .git from running
 // anything on the host. root is a worktree mounted rw in the cage.
-func (pl *Plan) guardGit(root, mode string) {
+func (pl *Plan) guardGit(root, mode string) error {
 	common, gitDir := gitPaths(root)
 	if common == "" {
-		return
+		return nil
 	}
 	outside := !within(common, root)
 	switch mode {
@@ -187,7 +205,7 @@ func (pl *Plan) guardGit(root, mode string) {
 		if gitDir != common {
 			pl.Masks = append(pl.Masks, filepath.Join(root, ".git"))
 		}
-		return
+		return nil
 	case GitRO:
 		if outside {
 			pl.ExtraMounts = append(pl.ExtraMounts, backend.Mount{Source: common, Target: common, ReadOnly: true})
@@ -198,7 +216,7 @@ func (pl *Plan) guardGit(root, mode string) {
 			pl.ReadOnly = append(pl.ReadOnly, filepath.Join(root, ".git"))
 		}
 		pl.ReadOnly = append(pl.ReadOnly, WritableGitPaths(root)...)
-		return
+		return pl.translatePointers(root, common, gitDir)
 	}
 	if outside {
 		pl.ExtraRW = append(pl.ExtraRW, common)
@@ -244,6 +262,23 @@ func (pl *Plan) guardGit(root, mode string) {
 	// at inside the worktree would run on the host after the agent edits
 	// them (core.hooksPath=.husky is the common case).
 	pl.ReadOnly = append(pl.ReadOnly, WritableGitPaths(root)...)
+	return pl.translatePointers(root, common, gitDir)
+}
+
+// translatePointers: git's pointer files hold absolute host paths. Where
+// the guest spells them differently (Windows: C:/Users/... -> /c/Users/...),
+// the cage sees a read-only copy rewritten for the guest; the host's file
+// is untouched.
+func (pl *Plan) translatePointers(root, common, gitDir string) error {
+	if gitDir == "" || gitDir == common {
+		return nil
+	}
+	for _, f := range []string{filepath.Join(root, ".git"), filepath.Join(gitDir, "commondir")} {
+		if err := pl.translate(f); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // NewPlan builds the plan for a worktree.
@@ -256,15 +291,23 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 	if err != nil {
 		return Plan{}, err
 	}
+	if err := backend.CheckGuestPath(root); err != nil {
+		return Plan{}, err
+	}
 	name := NameFor(root)
 	pl := Plan{Name: name, ID: Prefix + name, Root: root, SizeName: sn, Size: size}
+	if backend.GuestPath(root) != root {
+		pl.AutoCRLF = hostGitConfig(root, "core.autocrlf")
+	}
 
 	mode, err := GitMode(g, p)
 	if err != nil {
 		return Plan{}, err
 	}
 	pl.Git = mode
-	pl.guardGit(root, mode)
+	if err := pl.guardGit(root, mode); err != nil {
+		return Plan{}, err
+	}
 	if pl.Cache, err = CacheMode(g, p); err != nil {
 		return Plan{}, err
 	}
@@ -280,7 +323,9 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 	for _, m := range extra {
 		pl.Extra = append(pl.Extra, m)
 		if top, err := Root(m); err == nil && top == m {
-			pl.guardGit(m, mode)
+			if err := pl.guardGit(m, mode); err != nil {
+				return Plan{}, err
+			}
 		}
 	}
 	// A directory already mounted (read-only or reopened) can't be renamed
@@ -289,53 +334,186 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 	for _, p := range append(append([]string{}, pl.ReadOnly...), pl.ReopenRW...) {
 		mounted[p] = true
 	}
-	for _, d := range pinsFor(pl.ReadOnly, append(append([]string{root}, pl.Extra...), pl.ExtraRW...)) {
+	for _, d := range pinsFor(pl.Guarded(), append(append([]string{root}, pl.Extra...), pl.ExtraRW...)) {
 		if !mounted[d] {
 			pl.Pin = append(pl.Pin, d)
 		}
 	}
-
 	masks := append(append([]string{}, g.Masks...), p.Mask...)
 	unmask := append(append([]string{}, g.Unmask...), p.Unmask...)
-	for _, r := range append([]string{root}, pl.Extra...) {
-		pl.Masks = append(pl.Masks, FindMasks(r, masks, unmask)...)
+	for _, r := range pl.Roots() {
+		found, complete := FindMasksAll(r, masks, unmask)
+		if !complete {
+			return Plan{}, fmt.Errorf("more than %d secret-looking files in %s: zoo won't start a cage that hides only some of them. Add the ones that aren't secret (test fixtures, sample keys) to unmask: in zoo.yaml", MaxMasks, r)
+		}
+		pl.Masks = append(pl.Masks, found...)
 	}
 	return pl, nil
 }
 
-var skipDirs = map[string]bool{
-	".git": true, "node_modules": true, "vendor": true, ".venv": true, "venv": true,
-	"dist": true, "build": true, "target": true, ".next": true, ".turbo": true, ".cache": true,
+// guestPointer rewrites a git pointer file ("gitdir: C:/x/.git/worktrees/y",
+// or a commondir holding one absolute path) for the guest. ok is false when
+// nothing changes.
+func guestPointer(content string) (string, bool) {
+	line, rest, _ := strings.Cut(content, "\n")
+	line = strings.TrimRight(line, "\r")
+	prefix := ""
+	if v, found := strings.CutPrefix(line, "gitdir: "); found {
+		prefix, line = "gitdir: ", v
+	}
+	g := backend.GuestPath(line)
+	if g == line {
+		return content, false
+	}
+	return prefix + g + "\n" + rest, true
 }
 
-// FindMasks walks the worktree (depth 6, at most 256 hits) for secret-looking files.
+// translate stages a guest copy of a read-only git pointer file if the
+// guest needs different paths, and mounts the copy in its place.
+func (pl *Plan) translate(f string) error {
+	b, err := os.ReadFile(f)
+	if err != nil {
+		return nil // absent: nothing to translate
+	}
+	out, ok := guestPointer(string(b))
+	if !ok {
+		return nil
+	}
+	dir := filepath.Join(paths.Stage(), pl.Name, "guest")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	staged := filepath.Join(dir, fmt.Sprintf("%d-%s", len(pl.Files), filepath.Base(f)))
+	if err := os.WriteFile(staged, []byte(out), 0o444); err != nil {
+		// 0444 from an earlier run: replace it.
+		_ = os.Chmod(staged, 0o644)
+		if err := os.WriteFile(staged, []byte(out), 0o444); err != nil {
+			return fmt.Errorf("stage guest copy of %s: %w", f, err)
+		}
+	}
+	kept := pl.ReadOnly[:0]
+	for _, p := range pl.ReadOnly {
+		if p != f {
+			kept = append(kept, p)
+		}
+	}
+	pl.ReadOnly = kept
+	pl.Files = append(pl.Files, backend.Mount{Source: staged, Target: f, ReadOnly: true})
+	return nil
+}
+
+// gitEnv is git configuration the cage needs from its environment. Docker
+// Desktop shows Windows files to the guest as root-owned, so git's
+// ownership check (safe.directory) refuses the worktree. That check guards
+// against repositories owned by other users; inside a cage everything is
+// the agent's anyway. Bookworm's git (2.39) has no "dir/*" form, so "*"
+// covers submodule checkouts too. Unix hosts map ownership and need nothing.
+//
+// Line endings too: Git for Windows usually runs with core.autocrlf=true,
+// so the worktree holds CRLF files. Linux git without the same setting sees
+// every text file as modified (and would commit CRLF), so the cage gets the
+// host's value.
+func (pl Plan) gitEnv() []string {
+	if backend.GuestPath(pl.Root) == pl.Root {
+		return nil
+	}
+	kv := [][2]string{{"safe.directory", "*"}}
+	if pl.AutoCRLF != "" {
+		kv = append(kv, [2]string{"core.autocrlf", pl.AutoCRLF})
+	}
+	env := []string{fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(kv))}
+	for i, p := range kv {
+		env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, p[0]), fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, p[1]))
+	}
+	return env
+}
+
+// hostGitConfig is the host's effective value of a git setting for root
+// (system, global and repo config together), or "".
+func hostGitConfig(root, key string) string {
+	cmd := exec.Command("git", "-C", root, "config", "--get", key)
+	proc.Quiet(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Guarded is every host path the cage must see read-only: ReadOnly plus
+// the targets of Files (for zoo doctor).
+func (pl Plan) Guarded() []string {
+	out := append([]string{}, pl.ReadOnly...)
+	for _, f := range pl.Files {
+		out = append(out, f.Target)
+	}
+	return out
+}
+
+// skipDirs are dependency trees: huge, and holding other people's code
+// rather than this project's secrets. Build outputs are NOT skipped: they
+// copy secrets around (Next.js standalone output carries .env files).
+var skipDirs = map[string]bool{
+	".git": true, "node_modules": true, "vendor": true, ".venv": true, "venv": true,
+	"target": true, "__pycache__": true, ".gradle": true, ".terraform": true,
+}
+
+// Mask scan bounds. Past MaxMasks the cage isn't started at all (failing
+// closed beats hiding only some secrets); it's also about as many mounts as
+// fit on a Windows command line.
+const (
+	maskDepth = 12
+	MaxMasks  = 512
+)
+
+// FindMasks walks the worktree for secret-looking files (see FindMasksAll).
 func FindMasks(root string, masks, unmask []string) []string {
-	var out []string
+	out, _ := FindMasksAll(root, masks, unmask)
+	return out
+}
+
+// FindMasksAll walks the worktree (to depth maskDepth, skipping dependency
+// trees) for secret-looking files. complete is false when it found more
+// than MaxMasks.
+func FindMasksAll(root string, masks, unmask []string) (out []string, complete bool) {
+	complete = true
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, p)
 		if d.IsDir() {
-			if p != root && (skipDirs[d.Name()] || strings.Count(rel, string(filepath.Separator)) >= 6) {
+			if p != root && (skipDirs[d.Name()] || strings.Count(rel, string(filepath.Separator)) >= maskDepth) {
 				return filepath.SkipDir
 			}
 			return nil
-		}
-		if len(out) >= 256 {
-			return filepath.SkipAll
 		}
 		base := d.Name()
 		if match(unmask, base) {
 			return nil
 		}
 		if match(masks, base) || matchRel(masks, rel) {
+			if len(out) >= MaxMasks {
+				complete = false
+				return filepath.SkipAll
+			}
 			out = append(out, p)
 		}
 		return nil
 	})
 	sort.Strings(out)
-	return out
+	return out, complete
+}
+
+// foldCase: macOS and Windows file systems ignore case by default, so
+// .ENV is as secret as .env there.
+var foldCase = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+
+func fold(s string) string {
+	if foldCase {
+		return strings.ToLower(s)
+	}
+	return s
 }
 
 func match(patterns []string, name string) bool {
@@ -343,20 +521,39 @@ func match(patterns []string, name string) bool {
 		if strings.Contains(pat, "/") {
 			continue
 		}
-		if ok, _ := filepath.Match(pat, name); ok {
+		if ok, _ := path.Match(fold(pat), fold(name)); ok {
 			return true
 		}
 	}
 	return false
 }
 
+// matchRel matches patterns written with "/" (config/*.secret.json,
+// .kube/config) against a worktree-relative path, whatever the OS
+// separator. They match at any depth (apps/api/.kube/config) unless they
+// start with "/", which anchors them to the worktree root.
 func matchRel(patterns []string, rel string) bool {
+	rel = fold(filepath.ToSlash(rel))
 	for _, pat := range patterns {
 		if !strings.Contains(pat, "/") {
 			continue
 		}
-		if ok, _ := filepath.Match(pat, rel); ok {
-			return true
+		pat = fold(pat)
+		if anchored, ok := strings.CutPrefix(pat, "/"); ok {
+			if m, _ := path.Match(anchored, rel); m {
+				return true
+			}
+			continue
+		}
+		for tail := rel; ; {
+			if m, _ := path.Match(pat, tail); m {
+				return true
+			}
+			i := strings.IndexByte(tail, '/')
+			if i < 0 {
+				break
+			}
+			tail = tail[i+1:]
 		}
 	}
 	return false
@@ -384,6 +581,7 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 		LabelCPUs:     fmt.Sprint(pl.Size.CPUs),
 		LabelMemory:   pl.Size.Memory,
 		LabelImage:    image,
+		LabelMasks:    MasksFingerprint(pl.Masks),
 	}
 	if len(pl.Extra) > 0 {
 		b, _ := json.Marshal(pl.Extra)
@@ -411,23 +609,27 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 		Memory:   pl.Size.Memory,
 		Pids:     pl.Size.Pids,
 		Labels:   l,
-		Env:      append([]string{"ZOO_CAGE=" + pl.Name}, ProxyEnv(keeperIP)...),
+		Env:      append(append([]string{"ZOO_CAGE=" + pl.Name}, ProxyEnv(keeperIP)...), pl.gitEnv()...),
 		Mounts:   mounts,
 		Masks:    pl.Masks,
 		ReadOnly: pl.ReadOnly,
 		Pin:      pl.Pin,
 		ReopenRW: pl.ReopenRW,
+		Files:    pl.Files,
 	}
 	spec.Labels[LabelLayout] = Layout(spec)
 	return spec
 }
 
 // Layout fingerprints what a cage can't change while it exists: its mounts
-// and guards. Masks are left out (they're fixed at creation by design).
+// and guards. Masks have their own label (LabelMasks).
 func Layout(spec backend.CageSpec) string {
 	h := sha1.New()
 	for _, m := range spec.Mounts {
 		fmt.Fprintf(h, "m %s %s %v\n", m.Source, m.Target, m.ReadOnly)
+	}
+	for _, f := range spec.Files {
+		fmt.Fprintf(h, "f %s\n", f.Target)
 	}
 	for _, list := range [][]string{spec.ReadOnly, spec.Pin, spec.ReopenRW} {
 		for _, p := range list {
@@ -445,6 +647,8 @@ func Changed(st backend.Status, spec backend.CageSpec) string {
 		return "image"
 	case st.Labels[LabelLayout] != "" && st.Labels[LabelLayout] != spec.Labels[LabelLayout]:
 		return "layout"
+	case MasksChanged(st, spec):
+		return "masks"
 	}
 	return ""
 }
@@ -589,4 +793,25 @@ func Find(ctx context.Context, b backend.Backend, q string) (Info, error) {
 		return Info{}, fmt.Errorf("%q matches %d cages; be more specific", q, len(hits))
 	}
 	return Info{}, fmt.Errorf("no cage %q (see zoo ls)", q)
+}
+
+// MasksFingerprint identifies a set of masked files, so a cage created
+// before a secret file appeared can be told apart (masks are mounts, fixed
+// when the cage is created).
+func MasksFingerprint(masks []string) string {
+	s := append([]string(nil), masks...)
+	sort.Strings(s)
+	sum := sha1.Sum([]byte(strings.Join(s, "\n")))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+// MasksChanged reports whether the secret files a cage hides differ from
+// what it should hide now. A cage from before fingerprints counts as
+// changed only if there's something to mask.
+func MasksChanged(st backend.Status, spec backend.CageSpec) bool {
+	have, ok := st.Labels[LabelMasks]
+	if !ok {
+		return len(spec.Masks) > 0
+	}
+	return have != spec.Labels[LabelMasks]
 }

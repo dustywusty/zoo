@@ -17,14 +17,15 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/dusty/zoo/internal/backend"
 	"github.com/dusty/zoo/internal/cage"
 	"github.com/dusty/zoo/internal/config"
+	"github.com/dusty/zoo/internal/gitrefs"
 	"github.com/dusty/zoo/internal/keeper"
 	"github.com/dusty/zoo/internal/paths"
+	"github.com/dusty/zoo/internal/proc"
 	"github.com/dusty/zoo/internal/services"
 )
 
@@ -137,7 +138,7 @@ func (s *Server) Run(ctx context.Context) error {
 	for _, e := range keeper.ReadTail(1000, start) {
 		s.ingest(e, false)
 	}
-	go s.loop(ctx, 2*time.Second, s.pollCages)
+	go s.watchCages(ctx)
 	go s.loop(ctx, 2*time.Second, s.pollStats)
 	go s.loop(ctx, 5*time.Second, s.refreshAllowlist)
 	go s.loop(ctx, 2*time.Second, s.broadcastState)
@@ -160,6 +161,68 @@ func (s *Server) Run(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+// watchCages keeps the cage list current. Backends that report changes
+// (backend.Watcher: docker through its API) are refreshed when something
+// happens, plus a slow safety poll; others are polled every 2 s. Before
+// D25 docker was polled too, which meant several docker processes every
+// 2 s: enough to freeze a Windows desktop.
+func (s *Server) watchCages(ctx context.Context) {
+	s.pollCages()
+	w, ok := s.backend.(backend.Watcher)
+	if !ok {
+		s.loop(ctx, 2*time.Second, s.pollCages)
+		return
+	}
+	safety := time.NewTicker(30 * time.Second)
+	defer safety.Stop()
+	for ctx.Err() == nil {
+		changes, err := w.Watch(ctx)
+		if err != nil {
+			// No event stream (API unreachable): poll until it's back.
+			log.Printf("cage events: %v; polling", err)
+			t := time.NewTimer(30 * time.Second)
+			for done := false; !done; {
+				select {
+				case <-ctx.Done():
+					t.Stop()
+					return
+				case <-t.C:
+					done = true
+				case <-time.After(2 * time.Second):
+					s.pollCages()
+				}
+			}
+			continue
+		}
+		s.pollCages() // catch up on anything missed while (re)connecting
+		for open := true; open; {
+			select {
+			case <-ctx.Done():
+				return
+			case _, open = <-changes:
+				if open {
+					// Let a burst (create, connect, start) settle first.
+					time.Sleep(250 * time.Millisecond)
+					drain(changes)
+					s.pollCages()
+				}
+			case <-safety.C:
+				s.pollCages()
+			}
+		}
+	}
+}
+
+func drain(c <-chan struct{}) {
+	for {
+		select {
+		case <-c:
+		default:
+			return
+		}
+	}
 }
 
 func (s *Server) loop(ctx context.Context, every time.Duration, fn func()) {
@@ -202,13 +265,7 @@ func (s *Server) pollCages() {
 	}
 }
 
-func alive(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return p.Signal(syscall.Signal(0)) == nil
-}
+func alive(pid int) bool { return proc.Alive(pid) }
 
 func (s *Server) pollStats() {
 	samples, err := s.backend.Sample(context.Background())
@@ -394,12 +451,25 @@ func (s *Server) scanGitTraps() {
 			t, _ := cage.GitTraps(root)
 			traps = append(traps, t...)
 		}
+		// Branches and tags moved besides the cage's own, since its session
+		// began (snapshot taken by zoo run). Read from files: no process.
+		var moved []gitrefs.Change
+		if snap, ok := gitrefs.Load(paths.RefSnapshot(c.Name)); ok {
+			common, gitDir := cage.GitDirs(c.Worktree)
+			moved = gitrefs.Alarms(gitrefs.Check(snap, common, gitDir))
+		}
 		var alerts []Alert
 		s.mu.Lock()
 		for _, t := range traps {
 			if s.once("gittrap|"+t.Path+"|"+t.Reason, 24*time.Hour) {
 				alerts = append(alerts, s.newAlert("crit", c.Name, "Planted git repository",
 					fmt.Sprintf("%s (%s). Running git there, or opening it in an editor or a shell with a git prompt, can run commands the agent chose. Inspect and delete it.", t.Path, t.Reason)))
+			}
+		}
+		for _, m := range moved {
+			if s.once("ref|"+c.Name+"|"+m.Ref+"|"+m.To, 24*time.Hour) {
+				alerts = append(alerts, s.newAlert("warn", c.Name, "Branch moved: "+m.Ref,
+					fmt.Sprintf("%s while %s was running. Check it before you push. Undo: %s. If you did it on the host, accept with: zoo refs ok %s", m, c.Name, m.Undo(), c.Name)))
 			}
 		}
 		s.mu.Unlock()

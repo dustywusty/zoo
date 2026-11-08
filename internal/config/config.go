@@ -133,6 +133,23 @@ type Project struct {
 	Dockerfile string `yaml:"dockerfile"`
 }
 
+// DefaultMasks are file names (or, with a "/", paths at any depth; a
+// leading "/" anchors to the worktree) hidden inside cages.
+var DefaultMasks = []string{
+	// env files and per-tool secret stores
+	".env", ".env.*", ".envrc", ".dev.vars", ".npmrc", ".pypirc", ".netrc", ".git-credentials", ".pgpass", ".htpasswd",
+	// keys and keystores
+	"*.pem", "*.key", "*.p12", "*.pfx", "*.jks", "*.keystore", "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*",
+	// cloud and cluster credentials
+	"credentials.json", "client_secret*.json", "service-account*.json", "application_default_credentials.json",
+	"kubeconfig", "*.kubeconfig", ".kube/config", ".aws/credentials", ".docker/config.json", ".dockercfg",
+	// infrastructure state and secrets files
+	"*.tfvars", "*.tfstate", "*.tfstate.*", "secrets.yaml", "secrets.yml", "secrets.json",
+}
+
+// DefaultUnmask are names the masks would catch that are safe to show.
+var DefaultUnmask = []string{"*.example", "*.sample", "*.template", "*.pub"}
+
 func Defaults() Global {
 	return Global{
 		Port:        7777,
@@ -143,8 +160,8 @@ func Defaults() Global {
 			"medium": {CPUs: 4, Memory: "4G", Pids: 2048},
 			"large":  {CPUs: 6, Memory: "8G", Pids: 4096},
 		},
-		Masks:  []string{".env", ".env.*", "*.pem", "*.key", "*.p12", "id_rsa*", "id_ed25519*", ".npmrc", ".pypirc", ".netrc"},
-		Unmask: []string{".env.example", ".env.sample", ".env.template", "*.pub"},
+		Masks:  DefaultMasks,
+		Unmask: DefaultUnmask,
 		Harnesses: map[string]Harness{
 			"claude": {Command: "claude", Env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "claude"}},
 			"codex":  {Command: "codex", Env: map[string]string{"OPENAI_API_KEY": "codex"}, Files: map[string]string{".codex/auth.json": "codex-auth"}},
@@ -308,8 +325,9 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 #   small:  { cpus: 2, memory: 2G, pids: 1024 }
 #   medium: { cpus: 4, memory: 4G, pids: 2048 }
 #   large:  { cpus: 6, memory: 8G, pids: 4096 }
-# masks: [".env", ".env.*", "*.pem", "*.key", "*.p12", "id_rsa*", "id_ed25519*", ".npmrc", ".pypirc", ".netrc"]
-# unmask: [".env.example", ".env.sample", ".env.template", "*.pub"]
+# masks:    # REPLACES the built-in list (env files, keys, cloud and kube credentials,
+#           # tfvars/tfstate, secrets.*). To add instead, use mask: in a repo's zoo.yaml.
+# unmask: ["*.example", "*.sample", "*.template", "*.pub"]
 # git: rw                   # what cages may do with .git: rw (commit; hooks/config read-only),
 #                            # ro (read history only) or none (no .git). zoo.yaml can set it per repo
 # cache: project             # package caches (npm, pnpm, yarn, pip, uv, go, cargo, bun) kept

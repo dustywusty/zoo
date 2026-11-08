@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -107,6 +108,9 @@ func TestKnownHostsFile(t *testing.T) {
 }
 
 func TestResolve(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-socket agent layouts (macOS, Linux); Windows: TestResolveWindowsPipe")
+	}
 	home := shortDir(t)
 	oldHome, oldOS, oldEnv := userHomeDir, goos, getenv
 	t.Cleanup(func() { userHomeDir, goos, getenv = oldHome, oldOS, oldEnv })

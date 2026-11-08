@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/dusty/zoo/internal/proc"
 )
 
 // CLI shells out to a runtime's command-line tool (decision D5: no SDKs).
@@ -26,6 +28,7 @@ func (c CLI) Installed() bool {
 // returned even on error (some commands print partial results and exit 1).
 func (c CLI) Run(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, c.Bin, args...)
+	proc.Quiet(cmd)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
@@ -41,6 +44,7 @@ func (c CLI) Run(ctx context.Context, args ...string) (string, error) {
 // OK runs the CLI and reports only whether it exited 0.
 func (c CLI) OK(ctx context.Context, args ...string) bool {
 	cmd := exec.CommandContext(ctx, c.Bin, args...)
+	proc.Quiet(cmd)
 	return cmd.Run() == nil
 }
 

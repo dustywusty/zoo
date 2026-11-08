@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -28,7 +29,11 @@ import (
 // paths to 104 bytes and t.TempDir() is long).
 func shortDir(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp("/tmp", "zsa")
+	base := "/tmp"
+	if runtime.GOOS == "windows" {
+		base = "" // no /tmp; and no socket path limit to dodge
+	}
+	d, err := os.MkdirTemp(base, "zsa")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,11 +70,8 @@ func newUpstream(t *testing.T) *upstream {
 		sp, _ := ssh.NewPublicKey(pub)
 		u.keys[c] = testKey{c, priv, sp, ssh.FingerprintSHA256(sp)}
 	}
-	u.sock = filepath.Join(shortDir(t), "up.sock")
-	ln, err := net.Listen("unix", u.sock)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ln, addr := listenLocal(t, "up")
+	u.sock = addr
 	t.Cleanup(func() { ln.Close() })
 	go func() {
 		for {
@@ -108,11 +110,7 @@ func (l *eventLog) last(op string) Event {
 // the socket path.
 func startProxy(t *testing.T, p *Proxy, pol Policy) string {
 	t.Helper()
-	sock := filepath.Join(shortDir(t), "px.sock")
-	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ln, sock := listenLocal(t, "px")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); _ = p.ServeListener(ctx, ln, "c1", pol) }()
@@ -122,7 +120,7 @@ func startProxy(t *testing.T, p *Proxy, pol Policy) string {
 
 func dialAgent(t *testing.T, sock string) agent.ExtendedAgent {
 	t.Helper()
-	c, err := net.Dial("unix", sock)
+	c, err := dialLocal(sock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,6 +613,14 @@ func TestOpenSSHClientSendsSessionBind(t *testing.T) {
 	if err != nil {
 		t.Skip("no ssh binary")
 	}
+	if runtime.GOOS == "windows" {
+		// Windows' own OpenSSH speaks named pipes; Git for Windows' MSYS ssh
+		// (often first on PATH) doesn't.
+		sshBin = filepath.Join(os.Getenv("SystemRoot"), "System32", "OpenSSH", "ssh.exe")
+		if _, err := os.Stat(sshBin); err != nil {
+			t.Skip("no Windows OpenSSH client")
+		}
+	}
 	hk := newHostKey(t)
 	u := newUpstream(t)
 	addr := sshServer(t, hk.signer, u.keys["github"].pub)
@@ -630,6 +636,8 @@ func TestOpenSSHClientSendsSessionBind(t *testing.T) {
 	if err := os.WriteFile(idFile, ssh.MarshalAuthorizedKey(u.keys["github"].pub), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	ownerOnly(t, idFile)
+	ownerOnly(t, knownHosts)
 	// Known hosts parsed from the same file the client trusts.
 	known, err := KnownHostsFile(knownHosts)
 	if err != nil {
@@ -644,13 +652,14 @@ func TestOpenSSHClientSendsSessionBind(t *testing.T) {
 		sock := startProxy(t, &Proxy{Upstream: u.sock, Known: known, Log: log.add}, pol)
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, sshBin, "-F", "/dev/null",
+		cmd := exec.CommandContext(ctx, sshBin, "-F", os.DevNull,
 			"-o", "BatchMode=yes",
-			"-o", "IdentityAgent="+sock,
+			// ssh_config treats backslashes as escapes; pipes take / too.
+			"-o", "IdentityAgent="+filepath.ToSlash(sock),
 			"-o", "IdentityFile="+idFile,
 			"-o", "IdentitiesOnly=yes",
 			"-o", "UserKnownHostsFile="+knownHosts,
-			"-o", "GlobalKnownHostsFile=/dev/null",
+			"-o", "GlobalKnownHostsFile="+os.DevNull,
 			"-o", "StrictHostKeyChecking=yes",
 			"-o", "UpdateHostKeys=no",
 			"-o", "PasswordAuthentication=no",
