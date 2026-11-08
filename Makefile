@@ -1,10 +1,12 @@
 .PHONY: build test install dist snapshot
 
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.1.0-dev)
-LDFLAGS := -s -w -X main.version=$(VERSION)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo 0.1.0-dev)
+COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null)
+DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
 build:
-	go build -o zoo ./cmd/zoo
+	go build -ldflags "$(LDFLAGS)" -o zoo ./cmd/zoo
 
 test:
 	go test ./...
