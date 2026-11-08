@@ -4,19 +4,31 @@ From nothing to an agent working in a cage, in about ten minutes (most of it the
 
 ## 1. Install
 
-zoo isn't packaged yet, so build it from source. You need git and [Go 1.24+](https://go.dev/dl/):
-
 ```sh
-git clone https://github.com/dustywusty/zoo
-cd zoo
-make install          # builds zoo into ~/.local/bin
+brew install dustywusty/tap/zoo                 # macOS and Linux
 ```
 
-Make sure `~/.local/bin` is on your PATH (`export PATH="$HOME/.local/bin:$PATH"` in `~/.zshrc` or `~/.bashrc`), then `zoo version` should answer. To update later: `git pull && make install`.
+Other ways, from the [releases page](https://github.com/dustywusty/zoo/releases/latest):
 
-On Windows, `go build -o zoo.exe ./cmd/zoo` and put `zoo.exe` somewhere on your PATH.
+- **Debian/Ubuntu, Fedora/RHEL:** `sudo dpkg -i zoo_<version>_linux_amd64.deb` or `sudo rpm -i zoo_<version>_linux_amd64.rpm` (`arm64` files for ARM).
+- **Tarball:** darwin and linux, amd64 and arm64. Unpack and put `zoo` on your PATH.
+- **From source:** git and Go 1.24+, then `git clone https://github.com/dustywusty/zoo && cd zoo && make install` (builds into `~/.local/bin`; put that on your PATH). On Windows, `go build -o zoo.exe ./cmd/zoo` and put `zoo.exe` on your PATH.
 
-Homebrew, `.deb`/`.rpm` packages and signed release downloads are set up but not published yet; they'll arrive with the first release.
+If Homebrew says "Your Command Line Tools are too outdated", update them from Software Update in System Settings (or `sudo rm -rf /Library/Developer/CommandLineTools && sudo xcode-select --install`), then try again.
+
+<details>
+<summary>Verifying a download</summary>
+
+Every release has checksums, a keyless cosign signature over them, and GitHub build provenance:
+
+```sh
+shasum -a 256 --check --ignore-missing checksums.txt          # sha256sum on Linux
+gh attestation verify zoo_<version>_darwin_arm64.tar.gz --repo dustywusty/zoo
+cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp 'https://github.com/dustywusty/zoo/\.github/workflows/release\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+</details>
 
 ## 2. Pick a backend
 
