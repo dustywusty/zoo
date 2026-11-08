@@ -12,6 +12,8 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: "1.24" }
       - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      # GoReleaser runs go mod tidy before a release and refuses a dirty tree.
+      - run: go mod tidy -diff
       - run: go vet ./...
       - run: go test ./...
       - run: shellcheck -s bash assets/images/cage/zoo-doctor && shellcheck -s sh assets/images/cage/zoo-init assets/images/cage-overlay/zoo-setup assets/images/keeper/keeper-entrypoint

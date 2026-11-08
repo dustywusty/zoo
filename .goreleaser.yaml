@@ -64,6 +64,8 @@ brews:
       owner: dustywusty
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    # brew tap-new layout: formulae live in Formula/.
+    directory: Formula
     homepage: https://github.com/dustywusty/zoo
     description: Run AI coding agents in sandboxed VMs and containers
     test: |

@@ -85,4 +85,6 @@ A security change needs a test that fails without it: a planted path that's writ
 
 ## Releases
 
-Tagging `v*` runs `.github/workflows/release.yml`: tests, then GoReleaser builds tarballs, `.deb`/`.rpm` and the Homebrew formula, signs `checksums.txt` with keyless cosign, and attests build provenance. `make snapshot` builds the same locally without publishing.
+No release has been published yet. Before the first one, the repository has to be public (Homebrew, package downloads and `gh attestation verify` can't fetch private release assets) and a `HOMEBREW_TAP_TOKEN` secret has to be set: a fine-grained token with Contents read/write on `dustywusty/homebrew-tap` only. The tap exists; GoReleaser commits `Formula/zoo.rb` to it on each release.
+
+After that, tagging `v*` runs `.github/workflows/release.yml`: tests, then GoReleaser builds tarballs, `.deb`/`.rpm` and the Homebrew formula, signs `checksums.txt` with keyless cosign, and attests build provenance. `make snapshot` builds the same locally without publishing.
