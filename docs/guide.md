@@ -4,6 +4,7 @@ Everything you can do with zoo, roughly in the order you'll need it. New here? S
 
 - [Commands](#commands)
 - [Cages: sizes, sharing, resetting](#cages)
+- [Disposable tasks](#disposable-tasks)
 - [The allowlist](#the-allowlist)
 - [Per-repo settings: zoo.yaml](#per-repo-settings-zooyaml)
 - [Services: databases, host ports, SSH](#services)
@@ -26,6 +27,7 @@ Everything you can do with zoo, roughly in the order you'll need it. New here? S
 |---|---|
 | `zoo up` / `zoo down [--all]` | Start / stop the keeper and dashboard (`--all` also stops cages) |
 | `zoo run [harness] [--size S] [-- args]` | Run an agent in this worktree's cage (default harness: `claude`) |
+| `zoo task new/run/list/diff/apply/destroy` | Work in a separate copy, then review and apply edits |
 | `zoo shell [cage]` | Bash in a cage |
 | `zoo ls` / `zoo status` | List cages / backend, keeper, dashboard and shims at a glance |
 | `zoo stop <cage\|all>` / `zoo reset <cage>` | Stop a cage / delete it so the next run starts clean |
@@ -81,6 +83,43 @@ Not hidden: `*.example`, `*.sample`, `*.template`, `*.pub`. Add more per repo wi
 
 Masks are set when a cage starts. A secret file added while it runs is readable inside until it restarts; `zoo run` warns, and the next start hides it. If a worktree has more than 512 matches, zoo refuses to start the cage rather than hide only some: `unmask:` the ones that aren't secret (test fixtures, sample keys).
 
+## Disposable tasks
+
+A task gives the agent a separate project copy. The original files stay unchanged until you apply the edits.
+
+```sh
+zoo task new fix-parser .
+zoo task run fix-parser claude
+zoo task diff fix-parser --stat
+zoo task diff fix-parser
+zoo task apply fix-parser --dry-run
+zoo task apply fix-parser
+zoo task destroy fix-parser
+```
+
+`new` copies the selected directory, including tracked and non-ignored untracked files.
+It excludes secret masks, Git metadata, and dependency directories such as `node_modules`.
+Each task starts with a fresh Git baseline. Source history and submodules are not supported.
+The task inherits the approved source configuration. Unapproved `zoo.yaml` edits remain proposals.
+Extra host mounts are refused. Each task has a private package cache.
+
+`run` stops the task cage on normal exit. The task copy persists for another session.
+`diff` includes uncommitted edits and non-ignored new files. Host review uses a separate Git database outside the cage.
+`apply` writes unstaged edits to the original directory. It does not preserve agent commits.
+If a changed host file differs from the baseline, apply refuses the entire patch.
+Unrelated host edits remain unchanged. Do not edit the same host files during apply.
+
+Review and apply require a stopped cage and an available task backend.
+`destroy` removes the task copy, runtime cage, and private cache.
+If the task has unapplied changes, destruction requires `--discard`.
+
+**After a disconnect:** Run `zoo task list`, then `zoo task run NAME` to continue.
+If a previous command left a lock, first make sure that its process has exited.
+The error gives the lock path and process ID is stored inside that file.
+Remove that lock only after the process exits. Stop a surviving cage with `zoo stop CAGE --backend BACKEND` before review.
+An interrupted apply saves `last-apply.patch` and a recovery record outside the cage.
+Retry `apply` to recover a fully applied patch. Mixed host changes require manual recovery from the saved patch.
+
 ## The allowlist
 
 Cages can only reach hosts on the allowlist, through the keeper. A fresh install allows the model APIs (Anthropic, OpenAI), GitHub, npm, PyPI and the Go proxy. Everything else is refused and logged until you approve it.
@@ -97,6 +136,29 @@ zoo allowlist                       # the list, with time left on temporary entr
 The dashboard's **Allow** button does the same and asks how long. Changes apply to running cages immediately.
 
 Whatever the allowlist says, the keeper refuses private, loopback, link-local and CGNAT addresses (your LAN, your Mac, a tailnet, cloud metadata) and names ending `.localhost`, `.internal` or `.local`. To give a cage something on your machine or network, use a [service](#services).
+
+### Project network policy
+
+An approved `zoo.yaml` can replace the global allowlist for that project:
+
+```yaml
+network:
+  allow:
+    - api.anthropic.com
+    - registry.npmjs.org
+    - .pythonhosted.org
+```
+
+Run `zoo trust` after you review the change. A leading dot permits a domain and its subdomains.
+Without `network.allow`, the cage inherits the global allowlist. `allow: []` denies all web destinations.
+An explicit list replaces the global list. Include the model endpoints and package registries that the task requires.
+`zoo allow` and harness `allow:` entries do not widen an explicit project policy.
+Private addresses and unsafe ports remain blocked. Service grants are separate from this web policy.
+The dashboard shows **Project policy** instead of a global **Allow** button for project restrictions.
+
+Zoo reloads policies before an agent starts. The daemon also refreshes approved changes.
+Existing proxy connections can survive a reload. To revoke those connections, stop and restart the cage.
+If Docker cannot create a private cage network, startup fails without using a shared network.
 
 ## Per-repo settings: zoo.yaml
 
@@ -194,13 +256,15 @@ Leave out `readonly`/`push` for full access with the token; set only `readonly` 
 
 `repos:` narrows REST and git paths, but GraphQL can't be narrowed by path, so scope the token itself too. `zoo service ls` lists credentials and who holds them; `~/.zoo/keeper/log/inject.log` has a line per request (never the value). How the keeper does this safely is in [How it works](how-it-works.md#credentials).
 
-**Keeping the model token out too.** By default the agent's model token is in the cage as an environment variable. To keep it in the keeper:
+**Model credentials.** The default Claude and Codex harnesses use keeper placeholders.
+Store the Claude token with `zoo keys set claude`, or a Codex API key with `zoo keys set codex`.
+The real values stay on the host and in the keeper.
+For Codex API keys, Zoo writes a placeholder to `.codex/auth.json` inside the cage.
+A stored API key takes precedence over a stored subscription login.
 
-```yaml
-harnesses:
-  claude: { command: claude, env: { CLAUDE_CODE_OAUTH_TOKEN: "cred:claude" } }
-  codex:  { command: codex,  env: { OPENAI_API_KEY: "cred:codex" } }
-```
+Codex subscription login remains a direct-file fallback from `codex-auth`. Zoo prints a warning when it uses this fallback.
+Explicit harness overrides remain unchanged. Plain key references and `files:` still deliver real credentials into the cage.
+To remove credentials from an older cage, reset it before you start a new session.
 
 ## Agents and harnesses
 
@@ -299,12 +363,18 @@ zoo adds what a cage needs on top: an `agent` user with your uid, zoo's init, ba
 `zoo dash` opens `http://127.0.0.1:7777`.
 
 - **Cages:** status, isolation level, size, live CPU, memory and network against limits, agents attached, request and deny counts, granted services (with time left on temporary ones), preview links. Stop button.
-- **Network:** every request from every cage, live, plus service connections and SSH signatures. Search (`/`) matches host, URL, cage, method and status; `-term` excludes. Filter by cage and by All / Allowed / Denied / New hosts. Pause freezes the feed. **Allow** on a refused row approves the host for every cage, for as long as you say.
+- **Network:** every request from every cage, live, plus service connections and SSH signatures. Search (`/`) matches host, URL, cage, method and status; `-term` excludes. Filter by cage and by All / Allowed / Denied / New hosts. Pause freezes the feed. **Allow** changes the global list for cages that inherit it, for as long as you say.
 - **Services:** what's defined, its state, and who holds it; `+ grant` on a cage card.
 - **Approvals:** SSH signatures waiting for you (`approve: true`).
 - **Alerts:** refused requests, a repository planted in a worktree, a cage uploading more than 5 MB to one host (`bytes_out_alert`), temporary allows and grants lapsing. Set `ntfy_url` to get them on your phone.
 
 It listens on 127.0.0.1 only; changes need a per-install token, so other web pages can't drive it.
+
+Recent web events, alerts, counters, and session records persist in `history.json` across daemon restarts.
+The checkpoint keeps up to 5,000 web events and 500 alerts. It is saved every five seconds and on normal shutdown.
+Saved events retain their cage names even after an address is reused.
+Service connections, SSH signature events, and resource samples are not included in this checkpoint.
+If the checkpoint is corrupt, startup reports its path. Preserve that file before moving it aside to start with fresh history.
 
 ## Windows
 
@@ -341,7 +411,7 @@ Repos on network shares (`\\server\…`) can't be caged. Large `node_modules` tr
 | `ntfy_url` | | Send alerts to an [ntfy](https://ntfy.sh) topic |
 | `cage_image`, `keeper_image`, `network` | | Advanced: image tags and the cage network name |
 
-`zoo.yaml` keys: `size`, `mask`, `unmask`, `services`, `mounts`, `git`, `cache`, `image`, `dockerfile` (see [Per-repo settings](#per-repo-settings-zooyaml)).
+`zoo.yaml` keys: `size`, `mask`, `unmask`, `services`, `mounts`, `git`, `cache`, `image`, `dockerfile`, `network.allow` (see [Per-repo settings](#per-repo-settings-zooyaml)).
 
 Environment: `ZOO_HOME` (instead of `~/.zoo`), `ZOO_BACKEND`, `ZOO_ISOLATION_FLOOR`, `ZOO=off` (shims run the real CLI), `ZOO_KEYS_FILE=1` (files instead of the Keychain or Credential Manager).
 
@@ -352,6 +422,9 @@ Everything zoo keeps is under `~/.zoo`:
 | Path | What |
 |---|---|
 | `config.yaml` | Global config |
+| `tasks/NAME/` | Task copy, review baseline, metadata, and saved apply patch |
+| `history.json` | Recent web activity, alerts, counters, sessions, and log cursor |
+| `keeper/etc/project-access.json` | Generated address-to-policy mapping |
 | `keeper/etc/allowlist.txt` | The allowlist, one host per line |
 | `allow-expiry.json` | When temporary allowlist entries lapse |
 | `keeper/log/access.log` | Every web request through the keeper |

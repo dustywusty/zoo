@@ -28,6 +28,18 @@ The first time, the agent will hit hosts that aren't approved yet. Approve the o
 
 Using Docker, Podman, or Windows? See [Getting started](docs/getting-started.md#2-pick-a-backend).
 
+For disposable work, start with a separate project copy:
+
+```sh
+zoo task new fix-parser .
+zoo task run fix-parser claude
+zoo task diff fix-parser
+zoo task apply fix-parser
+zoo task destroy fix-parser
+```
+
+The original files change only on apply. Tasks persist across sessions. See [Disposable tasks](docs/guide.md#disposable-tasks).
+
 ## What a cage stops
 
 | An agent that's been talked into… | …gets |
@@ -57,4 +69,4 @@ The full list, and what zoo doesn't stop, is in [Security](docs/security.md).
 
 ## Status
 
-zoo is young and moving fast. It works day to day on Apple `container` and Docker; the [roadmap](docs/BRIEF.md#14-milestones-and-acceptance-gates) has what's next (per-project allowlists, history that survives restarts, agent session timelines, Kubernetes). Report security issues as described in [SECURITY.md](SECURITY.md).
+zoo is young and moving fast. It works day to day on Apple `container` and Docker; the [roadmap](docs/BRIEF.md#14-milestones-and-acceptance-gates) has what's next (agent session timelines, a full event store, Kubernetes). Report security issues as described in [SECURITY.md](SECURITY.md).

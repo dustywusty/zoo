@@ -76,6 +76,8 @@ type Server struct {
 	floor   backend.Isolation
 
 	mu        sync.Mutex
+	historyMu sync.Mutex
+	cursor    logCursor
 	cages     []cage.Info
 	keeperUp  bool
 	keeperIP  string
@@ -127,23 +129,46 @@ func New(cfg config.Global, b backend.Backend, floor backend.Isolation) (*Server
 
 // Run serves until ctx is done.
 func (s *Server) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	loaded, err := s.loadHistory()
+	if err != nil {
+		return err
+	}
 	s.refreshAllowlist()
 	s.pollCages()
 	// Backfill recent history so the feed isn't empty after a restart, then
 	// tail from exactly where the backfill stopped (0 if the log is new).
-	var start int64
-	if st, err := os.Stat(paths.AccessLog()); err == nil {
-		start = st.Size()
-	}
-	for _, e := range keeper.ReadTail(1000, start) {
-		s.ingest(e, false)
+	start := s.cursor.Offset
+	if !loaded {
+		s.cursor = initialCursor()
+		start = s.cursor.Offset
+		for _, e := range keeper.ReadTail(1000, start) {
+			s.ingest(e, false)
+		}
+	} else if !cursorMatches(s.cursor) {
+		start = 0
+		s.cursor = logCursor{}
 	}
 	go s.watchCages(ctx)
 	go s.loop(ctx, 2*time.Second, s.pollStats)
 	go s.loop(ctx, 5*time.Second, s.refreshAllowlist)
 	go s.loop(ctx, 2*time.Second, s.broadcastState)
 	go s.loop(ctx, 30*time.Second, s.scanGitTraps)
-	go s.tail(ctx, start)
+	tailDone := make(chan struct{})
+	go func() { defer close(tailDone); s.tail(ctx, start) }()
+	go s.loop(ctx, 5*time.Second, func() {
+		if err := s.saveHistory(); err != nil {
+			log.Printf("save history: %v", err)
+		}
+	})
+	defer func() {
+		cancel()
+		<-tailDone
+		if err := s.saveHistory(); err != nil {
+			log.Printf("save history: %v", err)
+		}
+	}()
 	go s.tailGate(ctx)
 	go s.runBridge(ctx)
 	go s.runPreview(ctx)
@@ -347,10 +372,16 @@ func (s *Server) tail(ctx context.Context, off int64) {
 			f.Close()
 			continue
 		}
-		if st.Size() < off {
+		s.mu.Lock()
+		cursor := s.cursor
+		s.mu.Unlock()
+		if st.Size() < off || !cursorMatches(cursor) {
 			// Truncated or replaced: start over.
 			off = 0
 			partial = nil
+			s.mu.Lock()
+			s.cursor = logCursor{}
+			s.mu.Unlock()
 		}
 		if st.Size() > off {
 			if _, err := f.Seek(off, io.SeekStart); err == nil {
@@ -359,9 +390,16 @@ func (s *Server) tail(ctx context.Context, off int64) {
 				buf = append(partial, buf...)
 				lines := bytes.Split(buf, []byte("\n"))
 				partial = append([]byte(nil), lines[len(lines)-1]...)
+				lineEnd := off - int64(len(buf))
 				for _, l := range lines[:len(lines)-1] {
+					lineEnd += int64(len(l) + 1)
+					cursor := cursorAt(lineEnd, append(append([]byte(nil), l...), '\n'))
 					if e, ok := keeper.ParseLine(string(l)); ok {
-						s.ingest(e, true)
+						s.ingestAt(e, true, &cursor)
+					} else {
+						s.mu.Lock()
+						s.cursor = cursor
+						s.mu.Unlock()
 					}
 				}
 			}
@@ -383,10 +421,24 @@ func (s *Server) cageForIP(ip string) string {
 }
 
 func (s *Server) ingest(e keeper.Event, live bool) {
+	s.ingestAt(e, live, nil)
+}
+
+func (s *Server) ingestAt(e keeper.Event, live bool, cursor *logCursor) {
 	s.mu.Lock()
+	if cursor != nil {
+		s.cursor = *cursor
+	}
 	s.nextID++
 	ev := NetEvent{ID: s.nextID, Event: e, Cage: s.cageForIP(e.Client)}
-	ev.Allowlisted = keeper.Allowed(s.allowlist, e.Host)
+	list := s.allowlist
+	for _, c := range s.cages {
+		if c.Name == ev.Cage && c.NetworkAllow != nil {
+			list = c.NetworkAllow
+			break
+		}
+	}
+	ev.Allowlisted = keeper.Allowed(list, e.Host)
 	if s.seen[ev.Cage] == nil {
 		s.seen[ev.Cage] = map[string]bool{}
 	}

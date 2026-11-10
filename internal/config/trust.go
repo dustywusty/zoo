@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/goccy/go-yaml"
@@ -66,6 +67,9 @@ func parseProject(b []byte) (Project, error) {
 	if err := yaml.Unmarshal(b, &p); err != nil {
 		return p, fmt.Errorf("zoo.yaml: %w", err)
 	}
+	for i, host := range p.Network.Allow {
+		p.Network.Allow[i] = strings.ToLower(strings.TrimSpace(host))
+	}
 	return p, nil
 }
 
@@ -77,6 +81,25 @@ func LoadProject(root string) (Project, error) {
 		return Project{}, nil
 	}
 	return parseProject([]byte(t.Content))
+}
+
+// CopyTrust carries only the host-approved configuration to a disposable copy.
+// It never approves an unreviewed proposal from the source worktree.
+func CopyTrust(source, destination string) error {
+	t, ok := readTrusted(source)
+	if !ok {
+		t = trusted{Present: false}
+	}
+	t.Root = filepath.Clean(destination)
+	t.Approved = time.Now().UTC()
+	if err := os.MkdirAll(paths.Trust(), 0o700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(t, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(trustFile(destination), append(b, '\n'), 0o600)
 }
 
 // TrustState compares a worktree's zoo.yaml on disk with the approved copy.

@@ -118,11 +118,15 @@ func RenderSquid(inject bool) string {
 
 // WriteSquid writes squid.conf; reports whether it changed.
 func WriteSquid(inject bool) (bool, error) {
-	b := []byte(RenderSquid(inject))
+	conf, err := renderProjectSquid(inject)
+	if err != nil {
+		return false, err
+	}
+	b := []byte(conf)
 	if old, err := os.ReadFile(paths.SquidConf()); err == nil && string(old) == string(b) {
 		return false, nil
 	}
-	return true, os.WriteFile(paths.SquidConf(), b, 0o644)
+	return true, writeConfigAtomic(paths.SquidConf(), b)
 }
 
 // EnsureFiles writes squid.conf, and the allowlist and gate config if missing.
@@ -378,6 +382,10 @@ func Up(ctx context.Context, b backend.Backend, g config.Global) (string, error)
 
 // Reload tells squid to re-read the allowlist.
 func Reload(ctx context.Context, b backend.Backend) error {
+	conf, err := os.ReadFile(paths.SquidConf())
+	if err != nil {
+		return err
+	}
 	var out bytes.Buffer
 	code, err := b.Exec(ctx, backend.ExecSpec{
 		ID: Name, Cmd: []string{"squid", "-k", "reconfigure", "-f", "/etc/zoo/squid.conf"},
@@ -389,7 +397,7 @@ func Reload(ctx context.Context, b backend.Backend) error {
 	if code != 0 {
 		return fmt.Errorf("squid reconfigure exited %d: %s", code, strings.TrimSpace(out.String()))
 	}
-	return nil
+	return writeConfigAtomic(appliedConfigPath(), configDigest(conf))
 }
 
 // Down stops the keeper.

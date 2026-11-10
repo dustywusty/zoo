@@ -646,13 +646,16 @@ function rowHTML(e, fresh) {
   let dest = "", verdict = "", act = "";
   if (e.k === "web") {
     const path = r.method === "CONNECT" ? "" : (() => { try { const u = new URL(r.url); return u.pathname + u.search; } catch { return ""; } })();
-    const onList = listed(e.host);
+    const cage = arr(state && state.cages).find(c => c.name === e.cage);
+    const scoped = cage && Array.isArray(cage.network_allow);
+    const onList = scoped ? cage.network_allow.some(h => h.startsWith(".") ? e.host === h.slice(1) || e.host.endsWith(h) : e.host === h) : listed(e.host);
     // Only flag what matters: first contact, and allowed traffic that isn't on the allowlist .
     const exp = state && state.allow_expiry && Object.entries(state.allow_expiry).find(([h]) => h.startsWith(".") ? e.host === h.slice(1) || e.host.endsWith(h) : e.host === h);
-    const tags = (r.first_seen ? `<span class="tag new">new</span>` : "") + (!e.denied && !onList ? `<span class="tag unl">not listed</span>` : "") + (onList && exp ? `<span class="tag ttl" title="temporary allow">${left(exp[1])}</span>` : "");
+    const tags = (r.first_seen ? `<span class="tag new">new</span>` : "") + (!e.denied && !onList ? `<span class="tag unl">not listed</span>` : "") + (onList && !scoped && exp ? `<span class="tag ttl" title="temporary allow">${left(exp[1])}</span>` : "");
     dest = `${esc(e.host)}${path ? `<span class="p">${esc(path.length > 80 ? path.slice(0, 80) + "…" : path)}</span>` : ""}${tags}`;
     verdict = e.denied ? "denied" : esc(r.status || "ok");
-    if (!onList && e.host) act = `<button class="btn sm" data-allow-host="${esc(e.host)}">Allow</button>`;
+    if (scoped && !onList) act = `<span class="s" title="Edit network.allow in zoo.yaml, then run zoo trust">Project policy</span>`;
+    else if (!onList && e.host) act = `<button class="btn sm" data-allow-host="${esc(e.host)}">Allow</button>`;
   } else if (e.k === "conn") {
     dest = `<span class="svc-n">${esc(r.service)}</span><span class="s">${esc(r.target)}</span>${e.denied && r.reason ? `<span class="why">${esc(r.reason)}</span>` : ""}`;
     verdict = e.denied ? "denied" : "open";
@@ -773,7 +776,7 @@ document.addEventListener("click", async (ev) => {
   const allow = t.closest("[data-allow-host]");
   if (allow) {
     const host = allow.dataset.allowHost;
-    const dur = askFor(`Allow ${host} for every cage.`);
+    const dur = askFor(`Allow ${host} for cages that use the global allowlist.`);
     if (dur === null) return;
     allow.disabled = true;
     try { await send("POST", "/api/allow", dur ? { host, for: dur } : { host }); if (state) state.allowlist = [...arr(state.allowlist), host]; toast(`${host} allowed${dur ? " for " + dur : ""}`); renderRows(); }

@@ -226,15 +226,13 @@ func (d *Docker) connectKeeper(ctx context.Context, keeperID, network string) (s
 }
 
 // CageNetwork gives each cage its own internal network with the keeper on
-// it, so cages can't reach each other. If the runtime runs out of address
-// space it falls back to the shared network.
+// it, so cages can't reach each other. Failure must not weaken isolation.
 func (d *Docker) CageNetwork(ctx context.Context, cageID string) (string, string, error) {
 	n := d.cageNet(cageID)
 	if !d.cli.OK(ctx, "network", "inspect", n) {
 		args := append([]string{"network", "create", "--label", "zoo=1", "--label", "zoo.cage-net=" + cageID}, d.internalNetArgs()...)
 		if _, err := d.cli.Run(ctx, append(args, n)...); err != nil {
-			fmt.Fprintf(os.Stderr, "zoo: couldn't create a network for %s (%v); it shares %s with other cages\n", cageID, err, d.network)
-			n = d.network
+			return "", "", fmt.Errorf("create isolated network for %s: %w; free unused runtime networks and retry", cageID, err)
 		}
 	}
 	ip, err := d.connectKeeper(ctx, backend.KeeperID, n)

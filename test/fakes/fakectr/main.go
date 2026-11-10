@@ -330,6 +330,11 @@ func (f *fake) prepareExec(args []string, notFound func(string) error, notRunnin
 	if err := checkEnv(p["env"]); err != nil {
 		return err
 	}
+	// Full CLI lifecycle tests record guest commands without executing them on
+	// the host. Contract tests retain real execution for their stream checks.
+	if os.Getenv("ZOO_FAKE_NO_EXEC") == "1" {
+		return nil
+	}
 	env := append(os.Environ(), c.Env...)
 	for _, ef := range p["env-file"] {
 		vals, err := readEnvFile(ef)

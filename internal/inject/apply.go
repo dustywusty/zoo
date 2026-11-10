@@ -116,10 +116,9 @@ func ApplyToCage(ctx context.Context, b backend.Backend, g config.Global, active
 // intercepted. harnessEnv maps ENV -> "cred:<name>" references.
 func Env(g config.Global, active map[string]config.Credential, cageName string, grants []string, harnessEnv map[string]string) ([]string, error) {
 	var env []string
-	if len(Hosts(active)) == 0 {
-		return nil, nil
+	if len(Hosts(active)) > 0 {
+		env = append(env, SessionEnv()...)
 	}
-	env = append(env, SessionEnv()...)
 	for _, n := range CageCredentials(active, grants) {
 		c := active[n]
 		ph, err := Placeholder(c, n, cageName)

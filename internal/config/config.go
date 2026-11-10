@@ -117,20 +117,27 @@ type Docker struct {
 
 // Project is zoo.yaml at a worktree root. Everything is optional.
 type Project struct {
-	Size     string   `yaml:"size"`
-	Harness  string   `yaml:"harness"`
-	Mask     []string `yaml:"mask"`
-	Unmask   []string `yaml:"unmask"`
-	Services []string `yaml:"services"` // services and credentials granted to this repo's cage
-	Git      string   `yaml:"git"`      // rw (default) | ro | none
-	Mounts   []string `yaml:"mounts"`   // further worktrees in the same cage (relative to this one, or ~/...)
-	Cache    string   `yaml:"cache"`    // package cache: project (default) | shared | off
+	// A non-nil allow list replaces the global web allowlist for this cage.
+	// An explicit empty list denies all web destinations.
+	Network  ProjectNetwork `yaml:"network"`
+	Size     string         `yaml:"size"`
+	Harness  string         `yaml:"harness"`
+	Mask     []string       `yaml:"mask"`
+	Unmask   []string       `yaml:"unmask"`
+	Services []string       `yaml:"services"` // services and credentials granted to this repo's cage
+	Git      string         `yaml:"git"`      // rw (default) | ro | none
+	Mounts   []string       `yaml:"mounts"`   // further worktrees in the same cage (relative to this one, or ~/...)
+	Cache    string         `yaml:"cache"`    // package cache: project (default) | shared | off
 	// Image is a base image for this repo's cage (zoo adds its user and
 	// init on top). Dockerfile is a Dockerfile in the worktree to build that
 	// base from instead; it's built only once you approve its contents with
 	// `zoo build --project`, with an empty build context.
 	Image      string `yaml:"image"`
 	Dockerfile string `yaml:"dockerfile"`
+}
+
+type ProjectNetwork struct {
+	Allow []string `yaml:"allow"`
 }
 
 // DefaultMasks are file names (or, with a "/", paths at any depth; a
@@ -163,14 +170,14 @@ func Defaults() Global {
 		Masks:  DefaultMasks,
 		Unmask: DefaultUnmask,
 		Harnesses: map[string]Harness{
-			"claude": {Command: "claude", Env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "claude"}},
-			"codex":  {Command: "codex", Env: map[string]string{"OPENAI_API_KEY": "codex"}, Files: map[string]string{".codex/auth.json": "codex-auth"}},
+			"claude": {Command: "claude", Env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "cred:claude"}},
+			"codex":  {Command: "codex", Env: map[string]string{"OPENAI_API_KEY": "cred:codex"}, Files: map[string]string{".codex/auth.json": "codex-auth"}},
 			"shell":  {Command: "bash"},
 		},
 		BytesOutAlert: 5 << 20,
 		// Bump the tag when the images or the mounts they expect change:
 		// zoo rebuilds missing images and replaces instances on an old tag.
-		CageImage:   "zoo-cage:m4",
+		CageImage:   "zoo-cage:m5",
 		KeeperImage: "zoo-keeper:m4",
 		Network:     "zoo-cages",
 		Credentials: map[string]Credential{
@@ -356,7 +363,7 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 #     push: ["agent/*"]       # ...plus git push to these branches
 #     repos: [you/app]        # and only these repositories
 # harnesses:
-#   claude:                   # keep the model token in the keeper too:
+#   claude:                   # default: keep the model token in the keeper
 #     command: claude
 #     env: { CLAUDE_CODE_OAUTH_TOKEN: "cred:claude" }
 #   pi:

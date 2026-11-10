@@ -863,6 +863,11 @@ Append new decisions at the bottom. Format: `D<n> (date): decision — why — a
 - **D40 (2026-11-07): Bring-your-own images are an overlay on the user's image; Dockerfiles build only once approved, with an empty context.** The overlay continues the user's final stage (some builders can't see local intermediate images). The tag hashes base, Dockerfile, overlay sources, uid/gid and zoo's cage tag; the `zoo.image` check recreates stopped cages. Approval stores the Dockerfile's hash and content per worktree; a change keeps the old image until `zoo build --project`. Rejected: building with the worktree as context (bakes in masked secrets) and auto-building on change (RUN steps have network outside the keeper).
 - **D16 (2026-10-28): `zoo up --backend X --isolation-floor Y` is remembered in `~/.zoo/state.json`** so later commands and the daemon agree; a plain `zoo up` clears the remembered floor. Precedence: flag > env (`ZOO_BACKEND`, `ZOO_ISOLATION_FLOOR`) > config `backend` (non-auto) > remembered > auto; floor: flag > env > remembered > config.
 
+- **D41 (2026-11-10): Broker supported model credentials by default.** Claude tokens and Codex API keys use keeper placeholders. Codex API mode writes placeholder auth JSON and takes precedence over subscription auth. Subscription auth remains an explicit direct-file fallback. User harness overrides remain supported.
+- **D42 (2026-11-10): Disposable tasks use separate copies and host-owned review data.** Only the work copy enters the cage. A fresh baseline excludes source Git metadata, ignored files, and masks. Apply produces unstaged edits and rejects conflicts with changed host files. A saved patch and pending baseline record support interrupted-apply recovery. Tasks retain approved source policy, reject extra mounts, and use private caches. Source history, submodules, and commit transfer are outside this first version.
+- **D43 (2026-11-10): Project web policies replace the global allowlist.** Omitted `network.allow` inherits the global list; an explicit empty list denies all web destinations. Only approved configuration supplies rules. Squid checks source address and destination after private-address and port denials. Unknown addresses fail closed after policy synchronization. Docker network creation failure never falls back to a shared cage network. Existing proxy connections require a cage restart for immediate revocation.
+- **D44 (2026-11-10): Persist recent web activity with an atomic JSON checkpoint.** Save events, original cage attribution, alerts, counters, sessions, and the log cursor together. Keep 5,000 events and 500 alerts. Resume from a complete log line and detect log replacement by a suffix check. This is an incremental restart-recovery feature, not completion of the SQLite store milestone. Resource samples and service/signature events remain outside this checkpoint.
+
 ---
 
 ## 16. Testing strategy
@@ -1052,6 +1057,8 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 - [ ] Gate
 
 ### 19.2 Changelog
+
+- 2026-11-10: Disposable tasks, default model credential brokering, project web policies, fail-closed Docker networks, and persistent web history (D41–D44). Cage image moves to m5 for policy-aware doctor probes. Unit/fake-runtime validation recorded in `docs/disposable-work-progress.md`; real cage escape checks remain `needs-hw-verify`.
 
 - 2026-10-28: v0 built (Apple backend, squid keeper, daemon, static dashboard, doctor, shims). Tested against a fake `container` CLI.
 - 2026-10-28: M0 verified on container 1.6.1. Fixed: in-guest masks/git guard silently failed (no CAP_SYS_ADMIN); squid -k reconfigure failed (squid was PID 1); `.git` rename bypassed the git guard; linked-worktree `.git` file and `commondir` were writable; IP-keyed learn mode leaked across cages on IP reuse; squid matched IP-literal CONNECTs by PTR name (now `dstdomain -n`).

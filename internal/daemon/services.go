@@ -105,6 +105,13 @@ func newSvcState() *svcState {
 // syncServices reloads services config (so edits apply without a restart),
 // starts granted sidecars, rewrites the gate config and refreshes the views.
 func (s *Server) syncServices(cs []cage.Info) {
+	if changed, err := cage.SyncNetwork(cs); err != nil {
+		log.Printf("project network policy: %v", err)
+	} else if changed {
+		if err := keeper.Reload(context.Background(), s.backend); err != nil {
+			log.Printf("keeper reload: %v", err)
+		}
+	}
 	if g, err := config.LoadGlobal(); err == nil {
 		s.mu.Lock()
 		s.cfg.Services = g.Services

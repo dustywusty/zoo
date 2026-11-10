@@ -528,6 +528,13 @@ func match(patterns []string, name string) bool {
 	return false
 }
 
+// Masked reports whether a relative file path is hidden by these rules.
+// Disposable copies use the same rules before any file enters the copy.
+func Masked(rel string, masks, unmask []string) bool {
+	base := filepath.Base(rel)
+	return !match(unmask, base) && (match(masks, base) || matchRel(masks, rel))
+}
+
 // matchRel matches patterns written with "/" (config/*.secret.json,
 // .kube/config) against a worktree-relative path, whatever the OS
 // separator. They match at any depth (apps/api/.kube/config) unless they
@@ -700,19 +707,20 @@ func waitRunning(ctx context.Context, b backend.Backend, id string) error {
 
 // Info is a cage as listed for humans and the dashboard.
 type Info struct {
-	Name      string   `json:"name"`
-	ID        string   `json:"id"`
-	Worktree  string   `json:"worktree"`
-	Size      string   `json:"size"`
-	CPUs      string   `json:"cpus"`
-	Memory    string   `json:"memory"`
-	Status    string   `json:"status"`
-	Running   bool     `json:"running"`
-	IP        string   `json:"ip"`
-	Isolation string   `json:"isolation"`
-	Weaker    bool     `json:"weaker_isolation"` // started below the isolation floor
-	Network   string   `json:"network"`
-	Mounts    []string `json:"mounts,omitempty"` // further worktrees (zoo.yaml mounts:)
+	NetworkAllow []string `json:"network_allow"` // nil inherits global policy; empty denies all
+	Name         string   `json:"name"`
+	ID           string   `json:"id"`
+	Worktree     string   `json:"worktree"`
+	Size         string   `json:"size"`
+	CPUs         string   `json:"cpus"`
+	Memory       string   `json:"memory"`
+	Status       string   `json:"status"`
+	Running      bool     `json:"running"`
+	IP           string   `json:"ip"`
+	Isolation    string   `json:"isolation"`
+	Weaker       bool     `json:"weaker_isolation"` // started below the isolation floor
+	Network      string   `json:"network"`
+	Mounts       []string `json:"mounts,omitempty"` // further worktrees (zoo.yaml mounts:)
 }
 
 // Roots is every worktree mounted in the cage: the main one, then the rest.
@@ -751,9 +759,14 @@ func List(ctx context.Context, b backend.Backend) ([]Info, error) {
 		if m := c.Labels[LabelMounts]; m != "" {
 			_ = json.Unmarshal([]byte(m), &extra)
 		}
+		project, err := config.LoadProject(c.Labels[LabelWorktree])
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, Info{
-			Mounts: extra,
-			Name:   name, ID: c.ID, Worktree: c.Labels[LabelWorktree],
+			NetworkAllow: project.Network.Allow,
+			Mounts:       extra,
+			Name:         name, ID: c.ID, Worktree: c.Labels[LabelWorktree],
 			Size: c.Labels[LabelSize], CPUs: c.Labels[LabelCPUs], Memory: c.Labels[LabelMemory],
 			Status: c.State, Running: c.Running, IP: c.IP,
 			Isolation: c.Labels[LabelIso], Weaker: c.Labels[LabelWeaker] == "1",
