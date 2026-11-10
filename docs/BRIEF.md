@@ -219,9 +219,9 @@ See [how-it-works.md](how-it-works.md) for the narrative and [architecture.md](a
 
 ### 6.5 Known limitations (each is scheduled in section 14)
 
-- Global allowlist only (plus temporary entries); no per-project or per-harness layering beyond harness `allow:` (M2).
+- Approved project allowlists replace the global list (D43). Per-harness policy layering beyond `allow:` remains outside this version (M2).
 - Attribution per cage IP, not per agent (M5).
-- No telemetry store; history is the logs plus an in-memory ring (M3).
+- Recent web history has a JSON checkpoint (D44). The full telemetry store and service-event persistence remain open (M3).
 - No file watcher, in-guest sensor, harness OTel ingestion or AG-UI timeline (M4, M7, M8).
 - Apple cages share one network and see the host gateway (apple/container#1320).
 - No disk limit; no Docker-in-cage (M4, M6).
@@ -868,6 +868,8 @@ Append new decisions at the bottom. Format: `D<n> (date): decision — why — a
 - **D43 (2026-11-10): Project web policies replace the global allowlist.** Omitted `network.allow` inherits the global list; an explicit empty list denies all web destinations. Only approved configuration supplies rules. Squid checks source address and destination after private-address and port denials. Unknown addresses fail closed after policy synchronization. Docker network creation failure never falls back to a shared cage network. Existing proxy connections require a cage restart for immediate revocation.
 - **D44 (2026-11-10): Persist recent web activity with an atomic JSON checkpoint.** Save events, original cage attribution, alerts, counters, sessions, and the log cursor together. Keep 5,000 events and 500 alerts. Resume from a complete log line and detect log replacement by a suffix check. This is an incremental restart-recovery feature, not completion of the SQLite store milestone. Resource samples and service/signature events remain outside this checkpoint.
 
+- **D45 (2026-11-10): Credential delivery checks live cage state and retries denials.** The first request can precede daemon polling. Inspect the runtime before releasing a key, and fail closed if inspection fails. The keeper caches successful lookups only. Bridge errors give a specific reason. The keeper image moves to m5. A real Docker check with a synthetic key reproduced the startup denial and passed after this fix.
+
 ---
 
 ## 16. Testing strategy
@@ -1058,7 +1060,7 @@ Answer from evidence when you can; otherwise ask the human (see section 1).
 
 ### 19.2 Changelog
 
-- 2026-11-10: Disposable tasks, default model credential brokering, project web policies, fail-closed Docker networks, and persistent web history (D41–D44). Cage image moves to m5 for policy-aware doctor probes. Unit/fake-runtime validation recorded in `docs/disposable-work-progress.md`; real cage escape checks remain `needs-hw-verify`.
+- 2026-11-10: Disposable tasks, default model credential brokering, project web policies, fail-closed Docker networks, and persistent web history (D41–D44). Cage image moves to m5 for policy-aware doctor probes. Real Docker deep escape, task lifecycle, policy, restart-history, and synthetic credential checks passed. The startup credential race is fixed in D45; keeper image moves to m5. Results are in `docs/disposable-work-progress.md`. Apple checks and authenticated model generation remain unverified.
 
 - 2026-10-28: v0 built (Apple backend, squid keeper, daemon, static dashboard, doctor, shims). Tested against a fake `container` CLI.
 - 2026-10-28: M0 verified on container 1.6.1. Fixed: in-guest masks/git guard silently failed (no CAP_SYS_ADMIN); squid -k reconfigure failed (squid was PID 1); `.git` rename bypassed the git guard; linked-worktree `.git` file and `commondir` were writable; IP-keyed learn mode leaked across cages on IP reuse; squid matched IP-literal CONNECTs by PTR name (now `dstdomain -n`).

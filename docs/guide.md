@@ -265,6 +265,7 @@ A stored API key takes precedence over a stored subscription login.
 Codex subscription login remains a direct-file fallback from `codex-auth`. Zoo prints a warning when it uses this fallback.
 Explicit harness overrides remain unchanged. Plain key references and `files:` still deliver real credentials into the cage.
 To remove credentials from an older cage, reset it before you start a new session.
+Credential delivery checks current runtime state. A temporary denial is retried on the next request.
 
 ## Agents and harnesses
 

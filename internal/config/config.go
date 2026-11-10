@@ -178,7 +178,7 @@ func Defaults() Global {
 		// Bump the tag when the images or the mounts they expect change:
 		// zoo rebuilds missing images and replaces instances on an old tag.
 		CageImage:   "zoo-cage:m5",
-		KeeperImage: "zoo-keeper:m4",
+		KeeperImage: "zoo-keeper:m5",
 		Network:     "zoo-cages",
 		Credentials: map[string]Credential{
 			// Used by harnesses whose env says "cred:claude" / "cred:codex".

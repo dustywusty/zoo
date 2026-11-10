@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
@@ -171,7 +172,10 @@ func TestInjectSwapsPlaceholder(t *testing.T) {
 	if string(dec) != "x-access-token:ghp_REAL" {
 		t.Fatalf("basic auth upstream = %q", dec)
 	}
-	if strings.Contains(h.log.String(), "ghp_REAL") {
+	h.in.logMu.Lock()
+	log := h.log.String()
+	h.in.logMu.Unlock()
+	if strings.Contains(log, "ghp_REAL") {
 		t.Fatal("secret written to the log")
 	}
 }
@@ -310,5 +314,42 @@ func TestPublicIP(t *testing.T) {
 		if got := publicIP(net.ParseIP(ip)); got != want {
 			t.Errorf("publicIP(%s) = %v", ip, got)
 		}
+	}
+}
+
+func TestBridgeSecretsRetriesDenial(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, answer := range []string{"NO cage isn't running\n", "OK " + base64.StdEncoding.EncodeToString([]byte("test-only-secret")) + "\n"} {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+			_, _ = bufio.NewReader(conn).ReadString('\n')
+			_, _ = io.WriteString(conn, answer)
+			conn.Close()
+		}
+	}()
+	defer func() { ln.Close(); <-done }()
+	g := &gate{}
+	g.cfg.Store(&config{Bridge: ln.Addr().String(), Token: "test-token"})
+	secret := bridgeSecrets(g)
+	if _, reason, ok := secret(ph); ok || !strings.Contains(reason, "running") {
+		t.Fatalf("first denial: %v %q", ok, reason)
+	}
+	if value, reason, ok := secret(ph); !ok || value != "test-only-secret" {
+		t.Fatalf("denial cached: %v %q", ok, reason)
+	}
+	// The bridge can close now: successful values retain their short cache.
+	ln.Close()
+	if value, _, ok := secret(ph); !ok || value != "test-only-secret" {
+		t.Fatal("successful value not cached")
 	}
 }

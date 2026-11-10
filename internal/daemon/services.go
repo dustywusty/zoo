@@ -305,18 +305,22 @@ func (s *Server) credAnswer(conn net.Conn, ph string) {
 	}
 	s.mu.Lock()
 	c, known := s.cfg.Credentials[cred]
-	running := false
-	for _, cg := range s.cages {
-		if cg.Name == cageName && cg.Running {
-			running = true
-		}
-	}
 	s.mu.Unlock()
+	// A new session can request its key before the event/poll loop sees its
+	// cage. Read the runtime here; a stale cache must neither deny a new cage
+	// nor authorize a stopped one.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, exists, err := s.backend.Get(ctx, cage.Prefix+cageName)
+	if err != nil {
+		io.WriteString(conn, "NO cannot check cage state\n")
+		return
+	}
 	switch {
 	case !known:
 		io.WriteString(conn, "NO no such credential\n")
 		return
-	case !running:
+	case !exists || !st.Running:
 		io.WriteString(conn, "NO cage isn't running\n")
 		return
 	case !c.AllCages && !s.granted(cageName, cred):
