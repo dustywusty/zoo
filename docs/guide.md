@@ -100,6 +100,7 @@ zoo task destroy fix-parser
 `new` copies the selected directory, including tracked and non-ignored untracked files.
 It excludes secret masks, Git metadata, and dependency directories such as `node_modules`.
 Each task starts with a fresh Git baseline. Source history and submodules are not supported.
+On Windows, projects with symlinks require permission to create symlinks. Zoo preserves symlinks instead of converting them to text files.
 The task inherits the approved source configuration. Unapproved `zoo.yaml` edits remain proposals.
 Extra host mounts are refused. Each task has a private package cache.
 

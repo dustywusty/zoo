@@ -189,6 +189,11 @@ func TestUnsafePathsAndSymlinks(t *testing.T) {
 	if err := os.Symlink("file.txt", filepath.Join(x.Workdir(), "link")); err != nil {
 		t.Fatal(err)
 	}
+	// Git for Windows defaults to core.symlinks=false. The host review repo
+	// must not turn an agent symlink into a file containing its target name.
+	if _, err := x.git("", nil, "config", "core.symlinks", "false"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := x.Apply(false); err != nil {
 		t.Fatal(err)
 	}
@@ -296,5 +301,28 @@ func TestTaskInheritsOnlyApprovedPolicy(t *testing.T) {
 	st, err := config.CheckTrust(task.Workdir())
 	if err != nil || !st.Changed {
 		t.Fatalf("agent proposal silently approved: %+v %v", st, err)
+	}
+}
+
+func TestCopyPreservesSymlink(t *testing.T) {
+	t.Setenv("ZOO_HOME", t.TempDir())
+	source := t.TempDir()
+	write(t, source, "file.txt", "original\n")
+	if err := os.Symlink("file.txt", filepath.Join(source, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	x, err := Create("links", source, config.Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target, err := os.Readlink(filepath.Join(x.Workdir(), "link")); err != nil || target != "file.txt" {
+		t.Fatalf("symlink converted on copy: %q %v", target, err)
+	}
+	setting, err := cleanGit(x.Workdir(), nil, "config", "--local", "core.symlinks")
+	if err != nil || strings.TrimSpace(string(setting)) != "true" {
+		t.Fatalf("guest symlink setting: %q %v", setting, err)
+	}
+	if diff, err := x.Diff(false); err != nil || len(diff) != 0 {
+		t.Fatalf("copy differs from baseline: %s %v", diff, err)
 	}
 }

@@ -54,6 +54,8 @@ The live credential check found a startup race. Credential requests now inspect
 runtime state directly. The keeper no longer caches denials. Regression tests
 cover stale running-state data, runtime failure, and retry after a denial.
 Race checks also found two unsynchronized test-log reads; both now use the log mutex.
+Windows CI found that Git could apply a symlink as a text file. Task Git operations
+now set `core.symlinks=true`, with a regression for a false repository default.
 
 Local verification images reused the installed m4 layers and replaced the changed
 doctor script and gate binary. CI builds both images from their full Dockerfiles.

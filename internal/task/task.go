@@ -141,7 +141,7 @@ func IsWorkdir(root string) bool {
 // cleanGit disables ambient Git configuration, hooks, filters, and alternate
 // object stores. In particular, no command discovers the agent's .git.
 func cleanGit(dir string, input []byte, args ...string) ([]byte, error) {
-	base := []string{"--no-pager", "-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false", "-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "core.protectNTFS=true", "-c", "core.protectHFS=true", "-c", "user.name=Zoo", "-c", "user.email=zoo@localhost"}
+	base := []string{"--no-pager", "-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false", "-c", "core.autocrlf=false", "-c", "core.symlinks=true", "-c", "core.safecrlf=false", "-c", "core.protectNTFS=true", "-c", "core.protectHFS=true", "-c", "user.name=Zoo", "-c", "user.email=zoo@localhost"}
 	cmd := exec.CommandContext(context.Background(), "git", append(base, args...)...)
 	cmd.Dir = dir
 	for _, v := range os.Environ() {
@@ -234,7 +234,7 @@ func Create(name, source string, g config.Global) (result Task, err error) {
 	}
 	// --no-local copies objects through Git's protocol; no shared object store
 	// or hardlinks connect the writable copy to the review database.
-	if _, err = cleanGit(t.Dir(), nil, "clone", "--no-local", "--template=", t.repo(), t.Workdir()); err != nil {
+	if _, err = cleanGit(t.Dir(), nil, "clone", "--no-local", "--template=", "--config", "core.symlinks=true", t.repo(), t.Workdir()); err != nil {
 		return result, err
 	}
 	if _, err = cleanGit(t.Dir(), nil, "--git-dir="+filepath.Join(t.Workdir(), ".git"), "remote", "remove", "origin"); err != nil {
