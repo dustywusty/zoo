@@ -34,11 +34,31 @@ Passed on 2026-11-10:
 The guide, README, and decision log D41–D44 describe the changes.
 The local build is available as `./zoo`; it has not been installed or deployed.
 
-## Remaining runtime verification
+## Runtime verification
 
-`needs-hw-verify`: Run the real cage escape suite and live model sessions on an
-isolated runtime before release. No live credentials or user keeper were used.
-The new cage image tag is m5; the keeper image remains m4.
+Passed on 2026-11-10 in a temporary Docker 29.9.3 daemon:
+
+- `zoo doctor --deep` for a normal checkout and a disposable task with deny-all policy.
+- Full disposable lifecycle, committed and uncommitted edits, secret exclusion,
+  stopped-cage checks, and private cache removal.
+- An explicit project list allowed GitHub and denied the globally allowed npm registry.
+- Agent edits to `zoo.yaml` stayed unapproved across sessions. An empty list denied GitHub.
+- Daemon and keeper restart retained 30 real web events, IDs, and cage attribution without duplicates.
+- Claude and Codex version commands started with synthetic credentials.
+- Codex auth JSON contained a placeholder, not the synthetic key.
+- A brokered HTTPS request reached OpenAI and returned the expected 401 for the synthetic key.
+- `test/runtime/disposable.sh` passed on the real engine and is included in Docker CI.
+- Full tests and vet passed with Go 1.24.13, the CI toolchain.
+
+The live credential check found a startup race. Credential requests now inspect
+runtime state directly. The keeper no longer caches denials. Regression tests
+cover stale running-state data, runtime failure, and retry after a denial.
+Race checks also found two unsynchronized test-log reads; both now use the log mutex.
+
+Local verification images reused the installed m4 layers and replaced the changed
+doctor script and gate binary. CI builds both images from their full Dockerfiles.
+Both default image tags are m5. No user keeper or real credentials were used.
+Authenticated model generation and Apple runtime checks remain outside this verification.
 
 ## Resume
 
@@ -46,7 +66,7 @@ Read this file, `git status`, and `git diff` before continuing.
 Read `CONTRIBUTING.md` for repository checks and security requirements.
 Do not start a development keeper on the Docker runtime: `zoo-keeper` is in use.
 Runtime names collide even with a separate `ZOO_HOME`.
-Use fake runtimes for CLI lifecycle tests. Apple container service is unavailable.
+Use a disposable engine for real CLI tests. Both normal runtimes have existing Zoo instances.
 The isolated Squid syntax check uses an unnamed temporary container and removes it on exit.
 
 ## Known limits

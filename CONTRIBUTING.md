@@ -16,7 +16,7 @@ Before a PR, the same checks CI runs:
 
 ```sh
 test -z "$(gofmt -l .)" && go vet ./... && go test ./...
-shellcheck -s bash assets/images/cage/zoo-doctor
+shellcheck -s bash assets/images/cage/zoo-doctor test/runtime/disposable.sh
 shellcheck -s sh assets/images/cage/zoo-init assets/images/cage-overlay/zoo-setup assets/images/keeper/keeper-entrypoint
 ```
 
@@ -63,6 +63,7 @@ After changing anything under `assets/images/`, rebuild: `zoo build`, then `zoo 
 - **Unit tests** next to the code. Pure logic is tested directly; anything touching the filesystem uses `t.TempDir()` and `t.Setenv("ZOO_HOME", …)`.
 - **Fake runtimes.** `test/fakes/fakectr` emulates the runtime CLIs (Apple 1.6.1 and docker 29 dialects), rejects anything it doesn't know, and records state. Point a backend at it with `ZOO_CONTAINER_BIN` / `ZOO_DOCKER_BIN`.
 - **Contract suite** (`internal/backend/contract`). Every backend must pass the same table: internal networks, no capabilities, no DNS, a process cap, read-only masks and git guard. A new backend starts here.
+- **Disposable runtime smoke test** (`test/runtime/disposable.sh`). Run after `zoo up` on a disposable Docker engine, with an absolute `ZOO_BIN`, separate `ZOO_HOME`, and `ZOO_KEYS_FILE=1`. It checks task apply/cleanup, approved network policies, and brokered HTTPS with a synthetic key. It makes no paid model calls.
 - **Escape suite** (`assets/images/cage/zoo-doctor`), run by `zoo doctor` inside a real cage. CI runs it on Linux with Docker against a main checkout and a linked worktree. Add a check here when you add a wall.
 - **CI** also runs the whole suite natively on Windows (`windows-unit`) and the daemon's Engine API path against real Docker and Podman (`engine-api`). The escape suite on Windows is run by hand.
 - **The keeper's gate and injector** (`assets/images/keeper/gate`) have their own tests, including real TLS round trips and a real `git push` through the injector.
