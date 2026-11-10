@@ -324,6 +324,16 @@ var behaviors = []behavior{
 			t.Errorf("HostBridge on Linux = %q, %q, %v; want the zoo-egress gateway 192.168.107.1 for both", listen, dial, err)
 		}
 	}},
+	{"CageNetworkFailure", func(t *testing.T, h *harness) {
+		if !h.tg.perCage {
+			return
+		}
+		t.Setenv("ZOO_FAKE_NETWORK_CREATE_FAIL", "1")
+		n, ip, err := h.b.CageNetwork(h.ctx, "zoo-failed-network")
+		if err == nil || n != "" || ip != "" || !strings.Contains(err.Error(), "no available address pools") {
+			t.Fatalf("network failure must stop cage creation: network=%q ip=%q err=%v", n, ip, err)
+		}
+	}},
 	{"CageNetwork", func(t *testing.T, h *harness) {
 		if got := h.b.Detect(h.ctx).Caps.PerCageNetworks; got != h.tg.perCage {
 			t.Errorf("Caps.PerCageNetworks = %v, want %v", got, h.tg.perCage)

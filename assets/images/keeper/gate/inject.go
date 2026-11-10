@@ -774,7 +774,9 @@ func bridgeSecrets(g *gate) secretSource {
 		}
 		mu.Unlock()
 		val, reason, ok := fetchSecret(g.cfg.Load(), ph)
-		if ok || reason != "" {
+		// A startup race or temporary bridge failure must not lock a new
+		// session out for the positive-cache lifetime.
+		if ok {
 			mu.Lock()
 			cache[ph] = cached{val, reason, ok, time.Now()}
 			mu.Unlock()
@@ -785,20 +787,20 @@ func bridgeSecrets(g *gate) secretSource {
 
 func fetchSecret(c *config, ph string) (string, string, bool) {
 	if c == nil || c.Bridge == "" {
-		return "", "", false
+		return "", "credential bridge is not configured", false
 	}
 	conn, err := net.DialTimeout("tcp", c.Bridge, 5*time.Second)
 	if err != nil {
-		return "", "", false
+		return "", "credential bridge is unavailable", false
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	if _, err := fmt.Fprintf(conn, "ZOO1 %s @cred %s\n", c.Token, ph); err != nil {
-		return "", "", false
+		return "", "credential bridge write failed", false
 	}
 	line, err := bufio.NewReaderSize(conn, 64*1024).ReadString('\n')
 	if err != nil {
-		return "", "", false
+		return "", "credential bridge response failed", false
 	}
 	line = strings.TrimRight(line, "\r\n")
 	if v, ok := strings.CutPrefix(line, "OK "); ok {

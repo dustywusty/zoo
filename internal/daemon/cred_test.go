@@ -2,11 +2,14 @@ package daemon
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
 
+	"github.com/dusty/zoo/internal/backend"
 	"github.com/dusty/zoo/internal/cage"
 	"github.com/dusty/zoo/internal/config"
 	"github.com/dusty/zoo/internal/inject"
@@ -24,12 +27,15 @@ func TestCredAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	cred := config.Credential{Hosts: []string{"api.github.com"}, Secret: "gh-pat"}
-	s := &Server{cfg: config.Global{Credentials: map[string]config.Credential{"github": cred}}, svc: newSvcState()}
-	s.cages = []cage.Info{{Name: "api-1", Running: true}, {Name: "web-2", Running: true}, {Name: "old-3"}}
+	runtime := &credentialBackend{running: map[string]bool{"zoo-api-1": true, "zoo-web-2": true, "zoo-old-3": false}}
+	s := &Server{backend: runtime, cfg: config.Global{Credentials: map[string]config.Credential{"github": cred}}, svc: newSvcState()}
+	// Deliberately stale: the new cage is absent and the stopped cage looks live.
+	s.cages = []cage.Info{{Name: "old-3", Running: true}}
 	s.svc.grants = map[string][]string{"api-1": {"github"}, "old-3": {"github"}}
 
 	ask := func(ph string) string {
 		a, b := net.Pipe()
+		defer b.Close()
 		go func() { s.credAnswer(a, ph); a.Close() }()
 		line, _ := bufio.NewReader(b).ReadString('\n')
 		return strings.TrimSpace(line)
@@ -39,6 +45,11 @@ func TestCredAnswer(t *testing.T) {
 	if got := ask(ph("api-1")); got != "OK "+base64.StdEncoding.EncodeToString([]byte("ghp_REAL")) {
 		t.Fatalf("granted cage: %q", got)
 	}
+	runtime.fail = true
+	if got := ask(ph("api-1")); !strings.HasPrefix(got, "NO ") {
+		t.Fatalf("runtime unavailable: %q", got)
+	}
+	runtime.fail = false
 	for name, p := range map[string]string{
 		"ungranted": ph("web-2"),
 		"stopped":   ph("old-3"),
@@ -49,4 +60,18 @@ func TestCredAnswer(t *testing.T) {
 			t.Errorf("%s: %q", name, got)
 		}
 	}
+}
+
+type credentialBackend struct {
+	backend.Backend
+	running map[string]bool
+	fail    bool
+}
+
+func (b *credentialBackend) Get(_ context.Context, id string) (backend.Status, bool, error) {
+	if b.fail {
+		return backend.Status{}, false, fmt.Errorf("test runtime unavailable")
+	}
+	running, exists := b.running[id]
+	return backend.Status{ID: id, Running: running}, exists, nil
 }

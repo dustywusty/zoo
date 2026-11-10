@@ -71,10 +71,11 @@ func TestValidate(t *testing.T) {
 func TestActiveAndCA(t *testing.T) {
 	setup(t)
 	g := config.Defaults()
-	// The built-in model-key definitions stay dormant until referenced.
-	if a := Active(g, nil); len(a) != 0 {
-		t.Fatalf("dormant credentials active: %v", a)
+	// Both built-in harnesses broker their model credentials by default.
+	if a := Active(g, nil); len(a) != 2 {
+		t.Fatalf("default credentials not active: %v", a)
 	}
+	delete(g.Harnesses, "codex")
 	g.Harnesses["claude"] = config.Harness{Command: "claude", Env: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "cred:claude"}}
 	g.Credentials["github"] = config.Credential{Hosts: []string{"github.com", "api.github.com"}, Secret: "gh", ReadOnly: true}
 	a := Active(g, nil)

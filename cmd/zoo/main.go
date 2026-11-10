@@ -40,11 +40,13 @@ import (
 	"github.com/dusty/zoo/internal/proc"
 	"github.com/dusty/zoo/internal/services"
 	"github.com/dusty/zoo/internal/shims"
+	"github.com/dusty/zoo/internal/task"
 )
 
 const usage = `zoo: agents in cages, one way out.
 
 Usage:
+  zoo task                       disposable copies: new, run, diff, apply, destroy
   zoo up                         start the keeper, the daemon and the dashboard
   zoo down [--all]               stop the daemon and keeper (--all: and every cage)
   zoo run [harness] [flags] [-- args]
@@ -121,6 +123,8 @@ func main() {
 		err = cmdDown(args)
 	case "run":
 		err = cmdRun(args)
+	case "task", "tasks":
+		err = cmdTask(args)
 	case "shell":
 		err = cmdShell(args)
 	case "ssh":
@@ -532,6 +536,13 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 	if err != nil {
 		return cage.Plan{}, "", err
 	}
+	if task.IsWorkdir(root) {
+		if len(proj.Mounts) > 0 {
+			return cage.Plan{}, "", fmt.Errorf("disposable tasks cannot mount other host worktrees; remove mounts: from the task's zoo.yaml")
+		}
+		// A disposable task must not write a shared cache another cage uses.
+		proj.Cache = cage.CacheProject
+	}
 	pl, err := cage.NewPlan(root, e.g, proj, size)
 	if err != nil {
 		return cage.Plan{}, "", err
@@ -608,13 +619,23 @@ func prepare(ctx context.Context, e env, cageName, size string) (cage.Plan, stri
 		}
 	}
 	active := syncKeeper(ctx, e)
+	cs, err := cage.List(ctx, e.b)
+	if err != nil {
+		return pl, ip, fmt.Errorf("list cages for network policy: %w", err)
+	}
+	if _, err := cage.SyncNetwork(cs); err != nil {
+		return pl, ip, fmt.Errorf("project network policy: %w", err)
+	}
+	if err := keeper.Reload(ctx, e.b); err != nil {
+		return pl, ip, fmt.Errorf("reload network policy: %w", err)
+	}
 	if err := applyServices(ctx, e, pl.Name, pl.ID, ip); err != nil {
 		say("services: %v", err)
 	}
 	if cs, err := cage.List(ctx, e.b); err == nil {
 		grants := services.GrantsFor(e.g, cs)[pl.Name]
 		if err := inject.ApplyToCage(ctx, e.b, e.g, active, pl.ID, pl.Name, grants); err != nil {
-			say("credentials: %v", err)
+			return pl, ip, fmt.Errorf("prepare cage credentials: %w", err)
 		}
 	}
 	return pl, ip, nil
@@ -723,15 +744,28 @@ func runIn(o runOpts, cageName string) error {
 		"HOME=/home/agent", "USER=agent", "ZOO_CAGE=" + pl.Name, "ZOO_INSIDE=1",
 		"TERM=" + envOr("TERM", "xterm-256color"), "COLORTERM=" + os.Getenv("COLORTERM"), "LANG=" + envOr("LANG", "en_US.UTF-8"),
 	}, cage.ProxyEnv(ip)...)
-	if cs, err := cage.List(ctx, e.b); err == nil {
-		grants := services.GrantsFor(e.g, cs)
-		env = append(env, services.SessionEnv(e.g, grants[pl.Name])...)
-		active, _, _ := inject.Activate(e.g, grants)
-		credEnv, err := inject.Env(e.g, active, pl.Name, grants[pl.Name], h.Env)
-		if err != nil {
-			return err
+	cs, err := cage.List(ctx, e.b)
+	if err != nil {
+		return fmt.Errorf("list cages for credentials: %w", err)
+	}
+	grants := services.GrantsFor(e.g, cs)
+	env = append(env, services.SessionEnv(e.g, grants[pl.Name])...)
+	active, _, err := inject.Activate(e.g, grants)
+	if err != nil {
+		return fmt.Errorf("activate credentials: %w", err)
+	}
+	credEnv, files, missing, err := harnessCredentials(g, h, active, pl.Name, grants[pl.Name])
+	if err != nil {
+		return err
+	}
+	env = append(env, credEnv...)
+	for rel, value := range files {
+		if err := writeGuestFile(ctx, e.b, pl.ID, "/home/agent/"+rel, value); err != nil {
+			return fmt.Errorf("place %s in the cage: %w", rel, err)
 		}
-		env = append(env, credEnv...)
+	}
+	if _, ok := files[".codex/auth.json"]; ok && len(missing) > 0 {
+		say("Codex subscription login is delivered to the cage; store an API key with `zoo keys set codex` for credential brokering")
 	}
 	if st, ok, _ := e.b.Get(ctx, pl.ID); ok {
 		env = append(env, cage.CacheEnv(st.Labels)...)
@@ -739,35 +773,6 @@ func runIn(o runOpts, cageName string) error {
 			if err := checkHarness(ctx, e.b, pl.ID, img, o.harness, h.Command); err != nil {
 				return err
 			}
-		}
-	}
-	var missing []string
-	for envName, item := range h.Env {
-		if strings.HasPrefix(item, "cred:") {
-			continue // a placeholder; the keeper holds the value
-		}
-		// Keychain item, or a vault reference (bw:…, op://…) fetched on this
-		// machine; the vault session itself never enters the cage.
-		v, err := keys.Resolve(item)
-		if err != nil {
-			say("%s: %v", item, err)
-		}
-		if v == "" {
-			missing = append(missing, item)
-			continue
-		}
-		env = append(env, envName+"="+v)
-	}
-	for rel, item := range h.Files {
-		v, err := keys.Resolve(item)
-		if err != nil {
-			say("%s: %v", item, err)
-		}
-		if v == "" {
-			continue
-		}
-		if err := writeGuestFile(ctx, e.b, pl.ID, "/home/agent/"+rel, v); err != nil {
-			say("couldn't place %s in the cage: %v", rel, err)
 		}
 	}
 	if len(missing) > 0 {
@@ -1196,6 +1201,10 @@ func cmdBlocked(args []string) error {
 		ip = c.IP
 	}
 	list, _ := keeper.ReadAllowlist()
+	rules, err := keeper.ReadProjects()
+	if err != nil {
+		return err
+	}
 	counts := map[string]int{}
 	f, err := os.Open(paths.AccessLog())
 	if err != nil {
@@ -1212,7 +1221,14 @@ func cmdBlocked(args []string) error {
 		if ip != "" && e.Client != ip {
 			continue
 		}
-		if !keeper.Allowed(list, e.Host) {
+		effective := list
+		for _, rule := range rules {
+			if rule.IP == e.Client && rule.Allow != nil {
+				effective = rule.Allow
+				break
+			}
+		}
+		if !keeper.Allowed(effective, e.Host) {
 			counts[e.Host]++
 		}
 	}
@@ -1402,7 +1418,20 @@ func cmdDoctor(args []string) error {
 	if err != nil {
 		return err
 	}
+	project, err := config.LoadProject(pl.Root)
+	if err != nil {
+		return err
+	}
+	allowed, err := keeper.ReadAllowlist()
+	if err != nil {
+		return err
+	}
+	if project.Network.Allow != nil {
+		allowed = project.Network.Allow
+	}
 	env := []string{
+		"ZOO_GITHUB_ALLOWED=" + strconv.FormatBool(keeper.Allowed(allowed, "api.github.com")),
+		"ZOO_EXAMPLE_ALLOWED=" + strconv.FormatBool(keeper.Allowed(allowed, "example.com")),
 		"ZOO_MASKS=" + strings.Join(backend.GuestPaths(pl.Masks), "\n"),
 		"ZOO_READONLY=" + strings.Join(backend.GuestPaths(pl.Guarded()), "\n"),
 		"ZOO_PIN=" + strings.Join(backend.GuestPaths(pl.Pin), "\n"),

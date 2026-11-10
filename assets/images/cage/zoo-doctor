@@ -27,12 +27,20 @@ if [ -z "${HTTPS_PROXY:-}" ]; then
 else
   code=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' https://api.github.com 2>&1)
   rc=$?
-  if [ $rc -eq 0 ]; then pass "allowlisted" "api.github.com via keeper (HTTP $code)"; else fail "allowlisted" "api.github.com via keeper failed: $code"; fi
+  if [ "${ZOO_GITHUB_ALLOWED:-true}" = true ]; then
+    if [ $rc -eq 0 ]; then pass "allowlisted" "api.github.com via keeper (HTTP $code)"; else fail "allowlisted" "api.github.com via keeper failed: $code"; fi
+  elif [ $rc -ne 0 ] && printf '%s' "$code" | grep -q '403'; then
+    pass "project-policy" "api.github.com denied by keeper"
+  else
+    fail "project-policy" "expected keeper denial for api.github.com: $code"
+  fi
 
   # 4. A host that is not allowlisted is refused by the keeper.
   out=$(curl -sS -m 15 -o /dev/null https://example.com 2>&1)
   rc=$?
-  if [ $rc -eq 0 ]; then
+  if [ "${ZOO_EXAMPLE_ALLOWED:-false}" = true ]; then
+    warn "not-allowlisted" "example.com is allowed; denial probe skipped"
+  elif [ $rc -eq 0 ]; then
     fail "not-allowlisted" "example.com was reachable through the keeper (is it on the allowlist?)"
   elif printf '%s' "$out" | grep -q '403'; then
     pass "not-allowlisted" "example.com denied by keeper"

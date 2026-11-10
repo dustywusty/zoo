@@ -16,7 +16,7 @@ jobs:
       - run: go mod tidy -diff
       - run: go vet ./...
       - run: go test ./...
-      - run: shellcheck -s bash assets/images/cage/zoo-doctor && shellcheck -s sh assets/images/cage/zoo-init assets/images/cage-overlay/zoo-setup assets/images/keeper/keeper-entrypoint
+      - run: shellcheck -s bash assets/images/cage/zoo-doctor test/runtime/disposable.sh && shellcheck -s sh assets/images/cage/zoo-init assets/images/cage-overlay/zoo-setup assets/images/keeper/keeper-entrypoint
 
   # Windows: the whole suite, natively (named pipes for docker and SSH
   # agents, Credential Manager, exe shims, no console windows: D25). No
@@ -114,6 +114,8 @@ jobs:
           $GITHUB_WORKSPACE/zoo refs 2>&1 | grep -q 'refs/heads/victim moved'
           $GITHUB_WORKSPACE/zoo refs ok
           $GITHUB_WORKSPACE/zoo refs 2>&1 | grep -q 'no branches or tags moved'
+      - name: disposable task lifecycle and project network policies
+        run: ZOO_BIN="$GITHUB_WORKSPACE/zoo" bash test/runtime/disposable.sh
       - name: floor refuses container isolation by default
         working-directory: /tmp/repo
         run: |

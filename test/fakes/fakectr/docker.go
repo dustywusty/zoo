@@ -276,6 +276,9 @@ func (f *fake) dockerNetwork(args []string) error {
 		if len(pos) != 1 {
 			return usagef("network create needs exactly one name")
 		}
+		if os.Getenv("ZOO_FAKE_NETWORK_CREATE_FAIL") == "1" {
+			return fmt.Errorf("no available address pools")
+		}
 		if d := p.last("driver"); d != "" && d != "bridge" {
 			return usagef("fake only supports the bridge driver")
 		}

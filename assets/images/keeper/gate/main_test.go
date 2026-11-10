@@ -129,7 +129,9 @@ func TestGate(t *testing.T) {
 		t.Errorf("connection on the wrong keeper address got through: %q", got)
 	}
 	time.Sleep(50 * time.Millisecond)
+	g.logMu.Lock()
 	log := logs.String()
+	g.logMu.Unlock()
 	for _, want := range []string{`"verdict":"allowed"`, `"reason":"no grant"`, `"cage":"api-1"`, `"reason":"arrived on the wrong network"`, `"via":"127.0.0.1"`} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log missing %s:\n%s", want, log)
