@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,9 @@ type Apple struct {
 	network  string
 	maskFile string
 	stageDir string
+	// onPath: the binary is the default `container` from PATH. Outside
+	// macOS, a program with that name is not Apple's (WSL ships one).
+	onPath bool
 }
 
 // New builds the backend. Bin defaults to $ZOO_CONTAINER_BIN, then `container`.
@@ -36,10 +40,11 @@ func New(o backend.Options) *Apple {
 	if bin == "" {
 		bin = os.Getenv("ZOO_CONTAINER_BIN")
 	}
+	onPath := bin == ""
 	if bin == "" {
 		bin = "container"
 	}
-	return &Apple{cli: backend.CLI{Bin: bin}, network: o.Network, maskFile: o.MaskFile, stageDir: o.StageDir}
+	return &Apple{cli: backend.CLI{Bin: bin}, network: o.Network, maskFile: o.MaskFile, stageDir: o.StageDir, onPath: onPath}
 }
 
 func (a *Apple) Name() string { return "apple" }
@@ -60,6 +65,10 @@ func (a *Apple) Detect(ctx context.Context) backend.Info {
 			PerCageKernel:        true,
 		},
 		Hint: "install Apple's `container` from https://github.com/apple/container/releases (macOS 26+, Apple silicon)",
+	}
+	if a.onPath && runtime.GOOS != "darwin" {
+		info.Hint = "Apple's `container` runs only on macOS"
+		return info
 	}
 	if !a.cli.Installed() {
 		return info
