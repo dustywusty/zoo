@@ -12,7 +12,8 @@ Other ways, from the [releases page](https://github.com/dustywusty/zoo/releases/
 
 - **Debian/Ubuntu, Fedora/RHEL:** `sudo dpkg -i zoo_<version>_linux_amd64.deb` or `sudo rpm -i zoo_<version>_linux_amd64.rpm` (`arm64` files for ARM).
 - **Tarball:** darwin and linux, amd64 and arm64. Unpack and put `zoo` on your PATH.
-- **From source:** git and Go 1.24+, then `git clone https://github.com/dustywusty/zoo && cd zoo && make install` (builds into `~/.local/bin`; put that on your PATH). On Windows, `go build -o zoo.exe ./cmd/zoo` and put `zoo.exe` on your PATH.
+- **From source:** git and Go 1.24+, then `git clone https://github.com/dustywusty/zoo && cd zoo && make install` (builds into `~/.local/bin`; put that on your PATH).
+- **Windows:** no release package yet. Build from source: see [Install on Windows](#install-on-windows).
 
 If Homebrew says "Your Command Line Tools are too outdated", update them from Software Update in System Settings (or `sudo rm -rf /Library/Developer/CommandLineTools && sudo xcode-select --install`), then try again.
 
@@ -29,6 +30,42 @@ cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 </details>
+
+### Install on Windows
+
+zoo runs on Windows 10 and 11 with Docker Desktop. The releases do not include a Windows build yet, so you build `zoo.exe` from source. Run these steps in PowerShell.
+
+1. Install Docker Desktop, Git for Windows, and Go:
+
+   ```powershell
+   winget install Docker.DockerDesktop Git.Git GoLang.Go
+   ```
+
+2. Start Docker Desktop. In its Settings, under General, make sure that "Use the WSL 2 based engine" is on.
+3. Open a new PowerShell window, so that it finds `git` and `go`.
+4. Build zoo:
+
+   ```powershell
+   git clone https://github.com/dustywusty/zoo
+   cd zoo
+   go build -o zoo.exe ./cmd/zoo
+   ```
+
+5. Copy `zoo.exe` to a folder in your user PATH. These commands use `%USERPROFILE%\.local\bin` and add it to your user PATH if it is not there:
+
+   ```powershell
+   $bin = "$env:USERPROFILE\.local\bin"
+   New-Item -ItemType Directory -Force $bin | Out-Null
+   Copy-Item zoo.exe $bin
+   $p = [Environment]::GetEnvironmentVariable('Path', 'User')
+   if (($p -split ';') -notcontains $bin) { [Environment]::SetEnvironmentVariable('Path', "$p;$bin", 'User') }
+   ```
+
+6. Open a new PowerShell window. Run `zoo version`, then `zoo backend`. The `docker` backend must show as ready.
+
+If `zoo` stops with "An Application Control policy has blocked this file", Smart App Control is on. Smart App Control is a Windows feature that blocks programs that have no code signature. A `zoo.exe` that you build yourself has no signature. The shims from step 8 are copies of `zoo.exe`, so Windows blocks them too. To see the setting, open Windows Security, then App & browser control, then Smart App Control settings. zoo does not run while this setting is on. On some Windows versions, you cannot turn Smart App Control back on after you turn it off, unless you reset Windows.
+
+Then continue with step 3 below. On Windows, start zoo with `zoo up --backend docker --isolation-floor container`. Step 2 tells why.
 
 ## 2. Pick a backend
 
@@ -126,7 +163,7 @@ export PATH="$HOME/.zoo/shims:$PATH"
 
 Restart the app afterwards. GUI apps that don't read your shell's PATH can point their agent path setting at `~/.zoo/shims/claude`. `ZOO=off claude` runs the real CLI outside any cage.
 
-On Windows, `zoo shims install --path` puts `%USERPROFILE%\.zoo\shims` (with `claude.exe`, `codex.exe`) first on your user PATH; restart Orca and your terminals. `set ZOO=off` runs the real CLI.
+On Windows, run `zoo shims install --path`. This command puts `%USERPROFILE%\.zoo\shims` (with `claude.exe` and `codex.exe`) first in your user PATH. Then close Orca and all terminals, and open them again. After that, `claude` in an Orca local tab runs in a cage. To run the real CLI outside a cage, set `ZOO=off`: `$env:ZOO = 'off'` in PowerShell, or `set ZOO=off` in cmd.
 
 Editors (VS Code, Cursor, JetBrains Gateway, Orca remote mode) can open a cage over SSH: see [SSH and editors](guide.md#ssh-and-editors).
 

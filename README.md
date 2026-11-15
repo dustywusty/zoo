@@ -26,7 +26,7 @@ zoo dash                            # the dashboard: cages, resources, every req
 
 The first time, the agent will hit hosts that aren't approved yet. Approve the ones you trust with **Allow** on the red row in the dashboard, or `zoo blocked` then `zoo allow <host>`. `zoo doctor` proves the walls hold from inside the cage.
 
-Using Docker, Podman, or Windows? See [Getting started](docs/getting-started.md#2-pick-a-backend).
+Using Docker or Podman? See [Getting started](docs/getting-started.md#2-pick-a-backend). On Windows, see [Install on Windows](docs/getting-started.md#install-on-windows).
 
 For disposable work, start with a separate project copy:
 
