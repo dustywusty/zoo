@@ -126,4 +126,4 @@ jobs:
         run: |
           ./zoo ls || true
           docker logs zoo-keeper 2>&1 | tail -20 || true
-          tail -50 "$ZOO_HOME/keeper/log/access.log" || true
+          sudo tail -50 "$ZOO_HOME/keeper/log/access.log" || true  # written by the keeper container user

@@ -48,15 +48,20 @@ printf 'network:\n  allow: [api.github.com]\n' > zoo.yaml
 "$ZOO_BIN" task new runtime-policy .
 "$ZOO_BIN" task run runtime-policy shell -- -c '
   set -eu
-  test "$(curl -sS -m 20 -o /dev/null -w "%{http_code}" https://api.github.com)" = 200
+  # On failure, say what answered: the keeper (CONNECT refused, 403) or
+  # GitHub itself (for example its rate limit for calls without login).
+  code=$(curl -sS -m 20 -o /tmp/gh.txt -w "%{http_code}" https://api.github.com 2>/tmp/gh.err) || true
+  if [ "$code" != 200 ]; then
+    echo "api.github.com: HTTP $code" >&2; cat /tmp/gh.err >&2; head -c 300 /tmp/gh.txt >&2; exit 1
+  fi
   if out=$(curl -sS -m 15 -o /dev/null https://registry.npmjs.org 2>&1); then exit 1; fi
-  printf "%s" "$out" | grep -q 403
+  printf "%s" "$out" | grep -q 403 || { echo "want 403 from the keeper, got: $out" >&2; exit 1; }
   printf "network:\n  allow: [registry.npmjs.org]\n" > zoo.yaml
 '
 "$ZOO_BIN" task run runtime-policy shell -- -c '
   set -eu
   if out=$(curl -sS -m 15 -o /dev/null https://registry.npmjs.org 2>&1); then exit 1; fi
-  printf "%s" "$out" | grep -q 403
+  printf "%s" "$out" | grep -q 403 || { echo "want 403 from the keeper, got: $out" >&2; exit 1; }
 '
 "$ZOO_BIN" task destroy runtime-policy --discard
 
@@ -66,7 +71,7 @@ printf 'network:\n  allow: []\n' > zoo.yaml
 "$ZOO_BIN" task run runtime-deny shell -- -c '
   set -eu
   if out=$(curl -sS -m 15 -o /dev/null https://api.github.com 2>&1); then exit 1; fi
-  printf "%s" "$out" | grep -q 403
+  printf "%s" "$out" | grep -q 403 || { echo "want 403 from the keeper, got: $out" >&2; exit 1; }
 '
 "$ZOO_BIN" task destroy runtime-deny
 # Synthetic key only: exercise the real credential bridge without a paid model call.
