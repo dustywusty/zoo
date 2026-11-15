@@ -104,7 +104,17 @@ Docs: https://github.com/dustywusty/zoo#docs
 func main() {
 	// Started as <harness>.exe from the shims dir (Windows shims): be the shim.
 	if h, ok := shims.Invoked(); ok {
-		os.Exit(shims.Run(h, os.Args[1:]))
+		os.Exit(shims.Run(h, os.Args[1:], ""))
+	}
+	// The shell shims (macOS, Linux) call `zoo shim <harness> args`. This
+	// comes before the global flags, which must not read the agent's args.
+	if len(os.Args) > 2 && os.Args[1] == "shim" {
+		self, err := os.Executable()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "zoo shim:", err)
+			os.Exit(127)
+		}
+		os.Exit(shims.Run(os.Args[2], os.Args[3:], self))
 	}
 	argv, err := parseGlobal(os.Args[1:])
 	if err != nil {

@@ -67,6 +67,17 @@ type Global struct {
 	// Credentials stay on the host; cages get a placeholder that the keeper
 	// swaps for the real value on the way to the credential's hosts.
 	Credentials map[string]Credential `yaml:"credentials"`
+
+	// Shims sets where the PATH shims run the real CLI instead of a cage.
+	Shims Shims `yaml:"shims"`
+}
+
+// Shims: off lists folders where the shims run the real CLI, for
+// projects whose agents need the host. A folder counts with everything
+// inside it. This setting is only in ~/.zoo/config.yaml, never in a
+// repository's zoo.yaml, because agents can edit their repository.
+type Shims struct {
+	Off []string `yaml:"off"`
 }
 
 // Credential is a secret the keeper adds to requests for some hosts, plus
@@ -257,6 +268,9 @@ func merge(g *Global, f Global) {
 	for k, v := range f.Credentials {
 		g.Credentials[k] = v
 	}
+	if f.Shims.Off != nil {
+		g.Shims.Off = f.Shims.Off
+	}
 	if f.Git != "" {
 		g.Git = f.Git
 	}
@@ -369,4 +383,7 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 #   pi:
 #     command: pi
 #     env: { ANTHROPIC_API_KEY: anthropic }   # ENV_VAR: keychain item (zoo keys set anthropic)
+# shims:
+#   off:                      # folders where the claude/codex shims run the real CLI,
+#     - ~/src/my-host-tools   # outside any cage (everything inside the folder counts)
 `

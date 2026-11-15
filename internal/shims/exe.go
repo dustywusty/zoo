@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -31,13 +32,16 @@ func manifest() string { return filepath.Join(paths.Shims(), ".zoo-shims") }
 var exeShims = runtime.GOOS == "windows"
 
 func installExe(harnesses []string, zooBin string) ([]string, error) {
+	removeOld()
 	var names, out []string
 	for _, h := range harnesses {
 		if h == "shell" {
 			continue
 		}
 		dst := filepath.Join(paths.Shims(), h+".exe")
-		_ = os.Remove(dst)
+		if err := removeOrMoveAside(dst); err != nil {
+			return out, fmt.Errorf("shim %s: %w", h, err)
+		}
 		if err := os.Link(zooBin, dst); err != nil {
 			if err := copyFile(zooBin, dst); err != nil {
 				return out, fmt.Errorf("shim %s: %w", h, err)
@@ -48,6 +52,35 @@ func installExe(harnesses []string, zooBin string) ([]string, error) {
 	}
 	body := "zoo " + zooBin + "\n" + strings.Join(names, "\n") + "\n"
 	return out, os.WriteFile(manifest(), []byte(body), 0o644)
+}
+
+// removeOrMoveAside clears the way for a new shim. Windows refuses to
+// delete or overwrite an exe while it runs. A shim is a hard link to
+// zoo.exe, so the zoo daemon, started from the old zoo.exe, keeps the old
+// shims in use too. Windows lets a running exe be renamed, so the old
+// shim moves aside as <name>.old-<n>, which PATH lookups do not find.
+func removeOrMoveAside(dst string) error {
+	err := os.Remove(dst)
+	if err == nil || errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	for i := 0; i < 100; i++ {
+		old := fmt.Sprintf("%s.old-%d", dst, i)
+		if _, e := os.Lstat(old); e == nil {
+			continue
+		}
+		return os.Rename(dst, old)
+	}
+	return fmt.Errorf("remove %s: %w", dst, err)
+}
+
+// removeOld deletes the shims that removeOrMoveAside moved aside, once
+// nothing runs them any more. A copy that still runs stays for later.
+func removeOld() {
+	old, _ := filepath.Glob(filepath.Join(paths.Shims(), "*.exe.old-*"))
+	for _, p := range old {
+		_ = os.Remove(p)
+	}
 }
 
 func copyFile(src, dst string) error {
@@ -87,6 +120,7 @@ func readManifest() (zooBin string, names []string) {
 }
 
 func uninstallExe() []string {
+	removeOld()
 	_, names := readManifest()
 	var removed []string
 	for _, n := range names {
@@ -124,12 +158,14 @@ func samePath(a, b string) bool {
 	return a == b
 }
 
-// Run is a shim's whole life: the real CLI when ZOO=off or already inside a
-// cage, otherwise `zoo run <harness> -- args` with the installed zoo. It
-// returns the exit code to leave with.
-func Run(harness string, args []string) int {
+// Run is a shim's whole life: the real CLI when runReal says so (ZOO=off,
+// already inside a cage, or a shims.off folder), otherwise
+// `zoo run <harness> -- args`. zooBin is the zoo to run; empty means the
+// installed zoo recorded in the manifest. It returns the exit code to
+// leave with.
+func Run(harness string, args []string, zooBin string) int {
 	var cmd *exec.Cmd
-	if strings.EqualFold(os.Getenv("ZOO"), "off") || os.Getenv("ZOO_INSIDE") != "" {
+	if runReal() {
 		real, err := FindReal(harness)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "zoo shim:", err)
@@ -137,7 +173,9 @@ func Run(harness string, args []string) int {
 		}
 		cmd = exec.Command(real, args...)
 	} else {
-		zooBin, _ := readManifest()
+		if zooBin == "" {
+			zooBin, _ = readManifest()
+		}
 		if zooBin == "" {
 			fmt.Fprintln(os.Stderr, "zoo shim: no zoo recorded; run `zoo shims install` again")
 			return 127
