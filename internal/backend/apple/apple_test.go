@@ -102,3 +102,30 @@ func TestRunArgsRejectsColon(t *testing.T) {
 		t.Fatal("paths with ':' can't be expressed with -v and must be refused, not mangled")
 	}
 }
+
+// WSL installs its own container.exe on Windows. zoo once took it for
+// Apple's tool, listed the apple backend as "not running", and told the
+// user to run `container system start`.
+func TestContainerOnPathIsNotAppleOutsideMacOS(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("on macOS, `container` on PATH is Apple's")
+	}
+	dir := t.TempDir()
+	name, body := "container", "#!/bin/sh\necho 'container CLI version 9.9.9'\n"
+	if runtime.GOOS == "windows" {
+		name, body = "container.bat", "@echo container CLI version 9.9.9\r\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("ZOO_CONTAINER_BIN", "")
+
+	info := New(backend.Options{}).Detect(t.Context())
+	if info.Installed || info.Running {
+		t.Fatalf("Detect = %+v, want not installed", info)
+	}
+	if !strings.Contains(info.Hint, "only on macOS") {
+		t.Errorf("hint = %q, want it to say macOS only", info.Hint)
+	}
+}
