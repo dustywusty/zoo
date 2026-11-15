@@ -374,8 +374,13 @@ func DialExec(ctx context.Context, b backend.Backend, id, addr string, port int)
 		if err != nil && ectx.Err() == nil {
 			log.Printf("preview: exec in %s: %v", id, err)
 		}
-		inR.Close()
+		// Output first: the reader gets EOF now. On Windows, closing inR
+		// can wait for a read that is still pending on it (a backend that
+		// copies stdin in a goroutine), and that read only ends when the
+		// reader closes the connection, after it sees EOF. The other order
+		// deadlocked TestDialExec on CI.
 		outW.Close()
+		inR.Close()
 		cancel()
 	}()
 	return &execConn{
