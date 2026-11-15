@@ -70,12 +70,25 @@ type Global struct {
 
 	// Shims sets where the PATH shims run the real CLI instead of a cage.
 	Shims Shims `yaml:"shims"`
+
+	// Updates sets whether the dashboard daemon checks GitHub for a newer
+	// zoo release, once a day. It is on unless check is false.
+	Updates Updates `yaml:"updates"`
 }
 
 // Shims: off lists folders where the shims run the real CLI, for
 // projects whose agents need the host. A folder counts with everything
 // inside it. This setting is only in ~/.zoo/config.yaml, never in a
 // repository's zoo.yaml, because agents can edit their repository.
+// Updates: check false stops the daily request to GitHub for the latest
+// release. zoo update still checks when you run it.
+type Updates struct {
+	Check *bool `yaml:"check"`
+}
+
+// CheckEnabled reports whether the daemon checks for updates.
+func (u Updates) CheckEnabled() bool { return u.Check == nil || *u.Check }
+
 type Shims struct {
 	Off []string `yaml:"off"`
 }
@@ -271,6 +284,9 @@ func merge(g *Global, f Global) {
 	if f.Shims.Off != nil {
 		g.Shims.Off = f.Shims.Off
 	}
+	if f.Updates.Check != nil {
+		g.Updates.Check = f.Updates.Check
+	}
 	if f.Git != "" {
 		g.Git = f.Git
 	}
@@ -383,6 +399,8 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 #   pi:
 #     command: pi
 #     env: { ANTHROPIC_API_KEY: anthropic }   # ENV_VAR: keychain item (zoo keys set anthropic)
+# updates:
+#   check: false              # stop the daily check for a newer zoo release (a request to GitHub)
 # shims:
 #   off:                      # folders where the claude/codex shims run the real CLI,
 #     - ~/src/my-host-tools   # outside any cage (everything inside the folder counts)

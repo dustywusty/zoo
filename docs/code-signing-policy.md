@@ -27,6 +27,8 @@ This program will not transfer any information to other networked systems unless
 
 zoo runs AI coding agents that you start. The agents connect to the services that you allow, for example a model API. zoo itself does not send data to the zoo project or to any other party.
 
+One exception: once a day, the zoo dashboard asks GitHub for the latest zoo release, to show when an update exists. The request goes to `api.github.com` and contains no data about you or your projects. GitHub sees your IP address. To turn it off, set `updates: { check: false }` in `~/.zoo/config.yaml`. See [Updating zoo](guide.md#updating-zoo).
+
 ## Report a problem
 
 If you think that a signed file is not from this project, or that it is harmful, report it as told in [SECURITY.md](../SECURITY.md).

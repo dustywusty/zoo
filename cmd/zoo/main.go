@@ -91,6 +91,7 @@ Usage:
   zoo cache clear <cage|shared|all>
                                  delete a cache (not while a cage using it runs)
   zoo tools [add|rm <tool>... [--all|--for <dir>]]  tools built into cage images (gh, go, apt:NAME...)
+  zoo update [--check]           replace zoo with the latest release (or say how, for Homebrew)
   zoo version
 
 Global flags (any command):
@@ -188,6 +189,8 @@ func main() {
 		err = cmdCache(args)
 	case "tools":
 		err = cmdTools(args)
+	case "update":
+		err = cmdUpdate(args)
 	case "version", "--version", "-v":
 		fmt.Println(versionString())
 	case "help", "--help", "-h":
@@ -379,6 +382,11 @@ func startDaemon(g config.Global) error {
 	if err != nil {
 		return err
 	}
+	return startDaemonFrom(g, self)
+}
+
+// startDaemonFrom starts the daemon from the zoo binary at self.
+func startDaemonFrom(g config.Global, self string) error {
 	logf, err := os.OpenFile(paths.DaemonLog(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
@@ -426,6 +434,7 @@ func cmdDaemon() error {
 	if err != nil {
 		return err
 	}
+	s.SetVersion(version)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return s.Run(ctx)

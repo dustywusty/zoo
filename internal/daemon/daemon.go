@@ -27,6 +27,7 @@ import (
 	"github.com/dusty/zoo/internal/paths"
 	"github.com/dusty/zoo/internal/proc"
 	"github.com/dusty/zoo/internal/services"
+	"github.com/dusty/zoo/internal/update"
 )
 
 //go:embed web/index.html
@@ -93,6 +94,9 @@ type Server struct {
 	nextID    int64
 	subs      map[chan []byte]struct{}
 	lastErr   string
+	version   string         // the zoo this daemon runs
+	update    *update.Status // last check for a newer release
+	updating  bool           // zoo update runs for the dashboard
 	svc       *svcState
 	prev      *previewState
 }
@@ -172,6 +176,10 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.tailGate(ctx)
 	go s.runBridge(ctx)
 	go s.runPreview(ctx)
+	go func() {
+		s.checkUpdates(ctx)
+		s.loop(ctx, time.Hour, func() { s.checkUpdates(ctx) })
+	}()
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.cfg.Port)
 	ln, err := net.Listen("tcp", addr)
@@ -622,6 +630,9 @@ type stateView struct {
 	Error       string               `json:"error,omitempty"`
 	Now         time.Time            `json:"now"`
 	PreviewPort int                  `json:"preview_port"` // 0 = preview URLs off
+	Version     string               `json:"version"`
+	Update      *update.Status       `json:"update,omitempty"`
+	Updating    bool                 `json:"updating,omitempty"`
 }
 
 func (s *Server) snapshot() stateView {
@@ -638,6 +649,9 @@ func (s *Server) snapshot() stateView {
 		Error:       s.lastErr,
 		Now:         time.Now().UTC(),
 		PreviewPort: PreviewPort(s.cfg),
+		Version:     s.version,
+		Update:      s.update,
+		Updating:    s.updating,
 	}
 	s.svc.mu.Lock()
 	v.Services = append([]ServiceView(nil), s.svc.views...)
@@ -690,6 +704,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/grants", s.handleGrant)
 	mux.HandleFunc("DELETE /api/grants", s.handleGrant)
 	mux.HandleFunc("POST /api/pending/{id}", s.handlePending)
+	mux.HandleFunc("POST /api/update", s.handleUpdate)
 	return s.guard(mux)
 }
 

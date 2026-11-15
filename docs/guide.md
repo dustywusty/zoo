@@ -45,6 +45,7 @@ Everything you can do with zoo, roughly in the order you'll need it. New here? S
 | `zoo doctor [--deep] [--json] [cage]` | Check every wall from inside a cage |
 | `zoo dash` | Open the dashboard |
 | `zoo tools [add\|rm <tool>… [--all\|--for <dir>]]` | Tools built into cage images: `gh`, `go`, `bun`, `apt:NAME`, `npm:NAME`, `pip:NAME` |
+| `zoo update [--check]` | Replace zoo with the latest release, refresh the shims and restart the dashboard (`--check`: only say if one exists) |
 | `zoo shims install [--path]\|uninstall` | Put `claude`/`codex`/… shims on PATH so other tools land in cages (`--path`: Windows user PATH) |
 | `zoo build [cage\|keeper]` / `zoo build --project` | Rebuild images / approve and build this repo's Dockerfile |
 | `zoo backend [list\|use <name>]` | Show runtimes and their isolation; pick one |
@@ -414,8 +415,24 @@ zoo adds what a cage needs on top: an `agent` user with your uid, zoo's init, ba
 - **Services:** what's defined, its state, and who holds it; `+ grant` on a cage card.
 - **Approvals:** SSH signatures waiting for you (`approve: true`).
 - **Alerts:** refused requests, a repository planted in a worktree, a cage uploading more than 5 MB to one host (`bytes_out_alert`), temporary allows and grants lapsing. Set `ntfy_url` to get them on your phone.
+- **Updates:** a banner when a newer zoo release exists, with an **Update** button that runs `zoo update`. For a Homebrew or package install, the banner shows the command to run instead. See [Updating zoo](#updating-zoo).
 
 It listens on 127.0.0.1 only; changes need a per-install token, so other web pages can't drive it.
+
+### Updating zoo
+
+Once a day, the dashboard daemon asks GitHub for the latest zoo release. GitHub sees a request from your IP address with the User-Agent `zoo-update`, and nothing else. To turn the check off, set this in `~/.zoo/config.yaml`:
+
+```yaml
+updates:
+  check: false
+```
+
+`zoo update` checks when you run it, even with the daily check off.
+
+An update downloads the release archive for your OS and architecture and the release's `checksums.txt`, both over HTTPS from GitHub. The archive's SHA-256 must match its line in `checksums.txt`, or nothing changes. zoo then replaces its own file, runs `zoo shims install` again if you use shims, and restarts the dashboard on the new version. On Windows, the old `zoo.exe` moves aside as `zoo.exe.old-<n>`, because Windows does not let a running program be replaced. The next update deletes it.
+
+If zoo came from Homebrew or a `.deb` or `.rpm` package, `zoo update` and the dashboard show the command to run instead, so that your package manager stays right. A zoo that you built yourself without a version (plain `go build`) is never offered an update.
 
 Recent web events, alerts, counters, and session records persist in `history.json` across daemon restarts.
 The checkpoint keeps up to 5,000 web events and 500 alerts. It is saved every five seconds and on normal shutdown.
@@ -455,6 +472,7 @@ Repos on network shares (`\\server\…`) can't be caged. Large `node_modules` tr
 | `credentials` | | [Credentials](#credentials-that-never-enter-a-cage) |
 | `harnesses` | `claude`, `codex`, `shell` | [Agents and harnesses](#agents-and-harnesses) |
 | `shims.off` | | Folders where the shims run the real CLI, outside any cage ([Launching from other tools](#agents-and-harnesses)) |
+| `updates.check` | `true` | Check GitHub once a day for a newer zoo release ([Updating zoo](#updating-zoo)) |
 | `bytes_out_alert` | `5242880` | Alert when one cage sends this many bytes to one host |
 | `ntfy_url` | | Send alerts to an [ntfy](https://ntfy.sh) topic |
 | `cage_image`, `keeper_image`, `network` | | Advanced: image tags and the cage network name |
