@@ -30,6 +30,10 @@ archives:
 checksum:
   name_template: checksums.txt
   algorithm: sha256
+  # The Windows zips come from the windows job in release.yml (signed by
+  # SignPath), not from a GoReleaser build.
+  extra_files:
+    - glob: '{{ envOrDefault "WINDOWS_DIST" "dist-windows" }}/*.zip'
 
 # Keyless cosign signature of checksums.txt (OIDC token from GitHub Actions).
 # Produces checksums.txt.sigstore.json (signature + certificate in one bundle).
@@ -75,6 +79,8 @@ release:
   github:
     owner: dustywusty
     name: zoo
+  extra_files:
+    - glob: '{{ envOrDefault "WINDOWS_DIST" "dist-windows" }}/*.zip'
 
 changelog:
   sort: asc

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration for the Windows release build.
+  SignPath keeps its own copy: paste this file into the SignPath project
+  when it changes. The release workflow uploads amd64/zoo.exe and
+  arm64/zoo.exe in one zip, and gives the version parameter in the form
+  0.1.2.0 (scripts/build-windows.sh writes the same value into each exe).
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <directory path="amd64">
+      <pe-file path="zoo.exe" product-name="zoo" product-version="${version}">
+        <authenticode-sign />
+      </pe-file>
+    </directory>
+    <directory path="arm64">
+      <pe-file path="zoo.exe" product-name="zoo" product-version="${version}">
+        <authenticode-sign />
+      </pe-file>
+    </directory>
+  </zip-file>
+</artifact-configuration>
