@@ -166,8 +166,8 @@ func TestPlanWorktree(t *testing.T) {
 	if pl.AutoCRLF != "" && !strings.Contains(env, "GIT_CONFIG_KEY_1=core.autocrlf GIT_CONFIG_VALUE_1="+pl.AutoCRLF) {
 		t.Errorf("host core.autocrlf=%s not mirrored: %v", pl.AutoCRLF, spec.Env)
 	}
-	// worktree, main .git, package cache
-	if len(spec.Mounts) != 3 || spec.Mounts[2].Target != CacheTarget || spec.Mounts[0].Source != root || spec.Mounts[0].Target != root || spec.Mounts[0].ReadOnly {
+	// worktree, main .git, package cache, kept home (.claude, .codex)
+	if len(spec.Mounts) != 3+len(KeptHome) || spec.Mounts[2].Target != CacheTarget || spec.Mounts[3].Target != AgentHomeTarget+"/.claude" || spec.Mounts[0].Source != root || spec.Mounts[0].Target != root || spec.Mounts[0].ReadOnly {
 		t.Errorf("mounts: %+v", spec.Mounts)
 	}
 	if !strings.Contains(strings.Join(spec.Env, " "), "HTTPS_PROXY=http://192.168.64.2:3128") {

@@ -572,6 +572,9 @@ func (t Task) Destroy(discard bool) error {
 			return errors.New("task has unapplied changes; apply them first, or use --discard")
 		}
 	}
+	if err := os.RemoveAll(paths.AgentHome(t.Cage())); err != nil {
+		return err
+	}
 	if err := os.RemoveAll(paths.CacheProject(t.Cage())); err != nil {
 		return err
 	}

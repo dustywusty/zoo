@@ -48,6 +48,10 @@ func InjectLog() string              { return filepath.Join(KeeperLog(), "inject
 
 // Package caches cages keep across `zoo reset` (cache: project | shared).
 func CacheRoot() string               { return filepath.Join(Home(), "cache") }
+
+// AgentHome holds the parts of a cage's home folder that survive a
+// recreate (~/.claude, ~/.codex). zoo reset deletes it.
+func AgentHome(cage string) string { return filepath.Join(Home(), "home", cage) }
 func CacheProjects() string           { return filepath.Join(CacheRoot(), "project") }
 func CacheProject(cage string) string { return filepath.Join(CacheProjects(), cage) }
 func CacheShared() string             { return filepath.Join(CacheRoot(), "shared") }

@@ -58,6 +58,8 @@ Global flags, on any command: `--backend apple|docker|podman|auto`, `--isolation
 
 One cage per git worktree, named after the directory plus a short hash. It persists: stop it and the next `zoo run` starts it again with the same files. Several agents in the same worktree share the cage.
 
+**What a recreate keeps.** zoo recreates a cage when its image or mounts change, for example after `zoo tools add`. Your worktree is on your machine, so it is never affected. In the agent's home folder, `~/.claude` and `~/.codex` are also kept: they live in `~/.zoo/home/<cage>` on your machine, so chat history, settings and logins survive. Everything else outside the worktree starts fresh. `zoo reset` deletes the kept folders too. Each cage has its own copy, so a file that an agent plants there, such as a hook in `~/.claude/settings.json`, stays in that cage only.
+
 **Sizes.** `zoo run --size medium`, or `size: medium` in `zoo.yaml`, or one-off `--size 3:6G`. Changing size restarts the cage; the worktree is untouched.
 
 | Size | CPUs | Memory | Processes |
@@ -307,6 +309,17 @@ shims:
 
 zoo compares folder paths only. It does not follow a worktree's `.git` file to its main repository, because a downloaded repository could point that file into a listed folder. So list each folder where the project's worktrees live. This setting is only in `~/.zoo/config.yaml`, never in a repository's `zoo.yaml`, because agents can edit their repository. On macOS and Linux, run `zoo shims install` again after you upgrade to a zoo with this setting.
 
+**Folders outside the worktree.** Some tools give the agent files outside the worktree. Orca passes each chat an attachments folder, a scratch folder (for chat visuals) and its chat plugin, as `--add-dir` and `--plugin-dir` arguments. List such folders under `host_folders` in `~/.zoo/config.yaml`, and zoo mounts them into every cage at the same path:
+
+```yaml
+host_folders:
+  - { path: ~/AppData/Local/Programs/orca/resources/native-chat-visuals, readonly: true }
+  - { path: ~/AppData/Roaming/orca/agent-session-attachments, readonly: true }
+  - path: ~/AppData/Roaming/orca/chat-scratch
+```
+
+When zoo starts an agent, it rewrites arguments that name a path in the worktree or in a host folder to the path the cage sees. On Windows, `C:\Users\you\x` becomes `/c/Users/you/x`. A folder that does not exist is left out. Every cage can read these folders, and zoo does not hide secret files in them, so list only what every agent may see. Adding or removing a folder changes the cage's mounts, so a cage moves to the new list at its next start.
+
 ## Previewing dev servers
 
 Each cage's dev servers are reachable from your browser, even when your machine can't route to the cage:
@@ -473,6 +486,7 @@ Repos on network shares (`\\server\…`) can't be caged. Large `node_modules` tr
 | `harnesses` | `claude`, `codex`, `shell` | [Agents and harnesses](#agents-and-harnesses) |
 | `shims.off` | | Folders where the shims run the real CLI, outside any cage ([Launching from other tools](#agents-and-harnesses)) |
 | `updates.check` | `true` | Check GitHub once a day for a newer zoo release ([Updating zoo](#updating-zoo)) |
+| `host_folders` | | Host folders mounted into every cage, `readonly` if set ([Agents and harnesses](#agents-and-harnesses)) |
 | `bytes_out_alert` | `5242880` | Alert when one cage sends this many bytes to one host |
 | `ntfy_url` | | Send alerts to an [ntfy](https://ntfy.sh) topic |
 | `cage_image`, `keeper_image`, `network` | | Advanced: image tags and the cage network name |
@@ -499,6 +513,7 @@ Everything zoo keeps is under `~/.zoo`:
 | `grants.json`, `grant-expiry.json` | `zoo grant`s and when temporary ones lapse |
 | `trust/`, `dockerfiles/` | Approved copies of each worktree's `zoo.yaml` and Dockerfile |
 | `tools.json` | Tool lists for cage images (`zoo tools`) |
+| `home/<cage>/` | Each cage's kept `~/.claude` and `~/.codex` (deleted by `zoo reset`) |
 | `cred-key` | The key placeholders are signed with (never leaves your machine) |
 | `cache/` | Package caches |
 | `refs/` | Each cage's branch and tag snapshot, for `zoo refs` |

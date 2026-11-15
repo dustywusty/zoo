@@ -21,6 +21,7 @@ import (
 	"github.com/dusty/zoo/internal/backend"
 	"github.com/dusty/zoo/internal/config"
 	"github.com/dusty/zoo/internal/keeper"
+	"github.com/dusty/zoo/internal/pathmatch"
 	"github.com/dusty/zoo/internal/paths"
 	"github.com/dusty/zoo/internal/proc"
 )
@@ -60,6 +61,10 @@ type Plan struct {
 	Git         string // rw | ro | none
 	Cache       string // project | shared | off
 	CacheDir    string // host dir mounted at CacheTarget ("" for off)
+	HomeDir     string // host dir with the kept home folders (KeptHome)
+	// HostFolders are host folders from host_folders: in the global
+	// config, mounted at the same path in every cage.
+	HostFolders []backend.Mount
 	Image       string // image to create the cage from ("" = g.CageImage)
 	// Files are read-only files shown with rewritten content (git
 	// pointers, where the guest spells host paths differently: Windows).
@@ -73,6 +78,17 @@ type Plan struct {
 
 // Roots is every worktree in the plan: the main one, then zoo.yaml mounts.
 func (pl Plan) Roots() []string { return append([]string{pl.Root}, pl.Extra...) }
+
+// GuestDirs is every host folder the cage sees: the worktrees and the
+// host folders. Agent arguments that name paths in them are rewritten
+// to the cage's paths (GuestArgs).
+func (pl Plan) GuestDirs() []string {
+	out := pl.Roots()
+	for _, m := range pl.HostFolders {
+		out = append(out, m.Source)
+	}
+	return out
+}
 
 // Root returns the git toplevel for dir, or dir itself outside a repo.
 func Root(dir string) (string, error) {
@@ -315,6 +331,22 @@ func NewPlan(root string, g config.Global, p config.Project, sizeFlag string) (P
 		if err := EnsureCacheDir(pl.CacheDir); err != nil {
 			return Plan{}, fmt.Errorf("package cache: %w", err)
 		}
+	}
+	pl.HomeDir = paths.AgentHome(name)
+	if err := EnsureHomeDir(pl.HomeDir); err != nil {
+		return Plan{}, fmt.Errorf("agent home: %w", err)
+	}
+	for _, f := range g.HostFolders {
+		dir := filepath.Clean(pathmatch.ExpandHome(strings.TrimSpace(f.Path)))
+		if !filepath.IsAbs(dir) {
+			return Plan{}, fmt.Errorf("host_folders: %q must be an absolute path (or start with ~)", f.Path)
+		}
+		// A folder that does not exist yet is left out: a runtime would
+		// create it as root on the host.
+		if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+			continue
+		}
+		pl.HostFolders = append(pl.HostFolders, backend.Mount{Source: dir, Target: dir, ReadOnly: f.ReadOnly})
 	}
 	extra, err := ResolveMounts(root, p.Mounts)
 	if err != nil {
@@ -606,6 +638,8 @@ func (pl Plan) Spec(g config.Global, keeperIP string, labels map[string]string) 
 	}
 	mounts = append(mounts, pl.ExtraMounts...)
 	mounts = append(mounts, pl.cacheMount()...)
+	mounts = append(mounts, pl.homeMounts()...)
+	mounts = append(mounts, pl.HostFolders...)
 	if pl.CacheDir != "" {
 		l[LabelCache] = pl.Cache
 	}
