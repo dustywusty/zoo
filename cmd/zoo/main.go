@@ -823,7 +823,7 @@ func runIn(o runOpts, cageName string) error {
 	}
 
 	spec := backend.ExecSpec{
-		ID: pl.ID, Cmd: append([]string{"/usr/local/bin/zoo-session", h.Command}, o.rest...),
+		ID: pl.ID, Cmd: append([]string{"/usr/local/bin/zoo-session", h.Command}, cage.GuestArgs(o.rest, pl.GuestDirs())...),
 		User: "agent", Workdir: backend.GuestPath(workdir), EnvFile: envFile,
 		TTY: isTerminal(os.Stdin) && isTerminal(os.Stdout),
 	}
@@ -1079,7 +1079,10 @@ func cmdReset(args []string) error {
 		return err
 	}
 	syncKeeper(ctx, e)
-	say("reset %s; the next `zoo run` there starts from a clean image", c.Name)
+	if err := os.RemoveAll(paths.AgentHome(c.Name)); err != nil {
+		say("could not delete the kept agent home %s: %v", paths.AgentHome(c.Name), err)
+	}
+	say("reset %s; the next `zoo run` there starts from a clean image, with no chat history (~/.claude, ~/.codex)", c.Name)
 	noteCacheKept(c.Name)
 	return nil
 }

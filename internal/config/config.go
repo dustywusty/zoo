@@ -74,6 +74,12 @@ type Global struct {
 	// Updates sets whether the dashboard daemon checks GitHub for a newer
 	// zoo release, once a day. It is on unless check is false.
 	Updates Updates `yaml:"updates"`
+
+	// HostFolders are host folders mounted into every cage at the same
+	// path, for tools that give agents files outside the worktree (Orca's
+	// chat attachments). Every cage can read them, so list only what
+	// every agent may see.
+	HostFolders []HostFolder `yaml:"host_folders"`
 }
 
 // Shims: off lists folders where the shims run the real CLI, for
@@ -82,6 +88,12 @@ type Global struct {
 // repository's zoo.yaml, because agents can edit their repository.
 // Updates: check false stops the daily request to GitHub for the latest
 // release. zoo update still checks when you run it.
+// HostFolder is one host_folders entry.
+type HostFolder struct {
+	Path     string `yaml:"path"`
+	ReadOnly bool   `yaml:"readonly"`
+}
+
 type Updates struct {
 	Check *bool `yaml:"check"`
 }
@@ -287,6 +299,9 @@ func merge(g *Global, f Global) {
 	if f.Updates.Check != nil {
 		g.Updates.Check = f.Updates.Check
 	}
+	if f.HostFolders != nil {
+		g.HostFolders = f.HostFolders
+	}
 	if f.Git != "" {
 		g.Git = f.Git
 	}
@@ -399,6 +414,9 @@ const starter = `# zoo global config. Everything here is optional; defaults are 
 #   pi:
 #     command: pi
 #     env: { ANTHROPIC_API_KEY: anthropic }   # ENV_VAR: keychain item (zoo keys set anthropic)
+# host_folders:              # host folders mounted into every cage, at the same path
+#   - path: ~/AppData/Roaming/orca/chat-scratch
+#   - { path: ~/AppData/Roaming/orca/agent-session-attachments, readonly: true }
 # updates:
 #   check: false              # stop the daily check for a newer zoo release (a request to GitHub)
 # shims:
