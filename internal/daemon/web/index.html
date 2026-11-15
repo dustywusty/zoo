@@ -55,6 +55,10 @@ h2 { font-size: 13px; font-weight: 600; margin: 0; color: var(--ink); letter-spa
 .sec-head .muted { font-size: 13px; }
 .sec-head .right { margin-left: auto; font-size: 12.5px; color: var(--muted); }
 .err { background: var(--red-soft); color: var(--red); padding: 12px 16px; border-radius: 10px; margin-bottom: 24px; font-size: 13px; display: none; }
+.update { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; background: var(--accent-soft); padding: 12px 16px; border-radius: 10px; margin-bottom: 24px; font-size: 13px; }
+.update[hidden] { display: none; }
+.update .what { flex: 1; min-width: 12em; }
+.update a { color: var(--accent); }
 
 /* buttons */
 .btn { font-size: 12.5px; line-height: 1; padding: 7px 11px; border-radius: 7px; border: 1px solid var(--line2); background: var(--surface); color: var(--ink); cursor: pointer; white-space: nowrap; }
@@ -267,6 +271,7 @@ kbd { font-family: var(--mono); font-size: 11px; line-height: 16px; padding: 0 5
 </header>
 <main>
   <div class="err" id="err"></div>
+  <div class="update" id="update" hidden></div>
   <div class="approvals" id="approvals" hidden></div>
 
   <section>
@@ -390,6 +395,37 @@ function renderHeader() {
   const err = $("err");
   err.style.display = state && state.error ? "block" : "none";
   if (state && state.error) err.textContent = state.error;
+}
+
+// ---- update ----
+// The daemon checks GitHub once a day (updates.check). The button runs
+// `zoo update`, which restarts the daemon on the new zoo; the page
+// reloads when it reconnects to a daemon with another version.
+let seenVersion = null, updateClicked = false;
+function renderUpdate() {
+  const el = $("update");
+  const v = state && state.version;
+  if (v && seenVersion === null) seenVersion = v;
+  if (v && seenVersion && v !== seenVersion) { toast("zoo updated to " + v); setTimeout(() => location.reload(), 800); seenVersion = v; }
+  const u = state && state.update;
+  if (!u || !u.available) { el.hidden = true; return; }
+  el.hidden = false;
+  const notes = u.url ? ` <a href="${esc(u.url)}" target="_blank" rel="noopener noreferrer">What's new</a>` : "";
+  if (state.updating || updateClicked) {
+    el.innerHTML = `<span class="what">Updating zoo to <b>${esc(u.latest)}</b>. The dashboard reconnects when it is done.</span>`;
+    return;
+  }
+  const what = `<span class="what">zoo <b>${esc(u.latest)}</b> is available. You have ${esc(u.current)}.${notes}</span>`;
+  if (u.kind !== "self") {
+    el.innerHTML = what + `<span class="muted">To update, run <span class="mono">${esc(u.command)}</span></span>`;
+    return;
+  }
+  el.innerHTML = what + `<button class="btn primary sm" id="update-btn">Update</button>`;
+  $("update-btn").onclick = async () => {
+    updateClicked = true; renderUpdate();
+    try { await send("POST", "/api/update"); }
+    catch (e) { updateClicked = false; renderUpdate(); toast("Update did not start: " + e.message, true); }
+  };
 }
 
 // ---- approvals ----
@@ -830,7 +866,7 @@ function scheduleRows() { if (!rowTimer) rowTimer = setTimeout(() => { rowTimer 
 function applyState(s) {
   state = s || {};
   if (Array.isArray(state.pending)) setApprovals(state.pending);
-  renderCages(); renderServices(); renderHeader();
+  renderCages(); renderServices(); renderHeader(); renderUpdate();
 }
 async function load() {
   const r = await fetch("/api/state");
