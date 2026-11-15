@@ -2,6 +2,7 @@ package shims
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -84,5 +85,54 @@ func TestInstallExeShims(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, "shims", "mine.exe")); err != nil {
 		t.Error("uninstall removed a file zoo didn't write")
+	}
+}
+
+// Upgrading zoo on Windows while the zoo daemon ran left an old shim that
+// could not be replaced: Windows refuses to delete or overwrite a running
+// exe. Here a shim runs (a copy of ping.exe that waits), and a new install
+// must still put the new shim in place.
+func TestInstallExeReplacesARunningShim(t *testing.T) {
+	if !exeShims {
+		t.Skip("executable shims are for Windows")
+	}
+	ping, err := exec.LookPath("ping.exe")
+	if err != nil {
+		t.Skip(err)
+	}
+	home := t.TempDir()
+	t.Setenv("ZOO_HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, "shims"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	running := filepath.Join(home, "shims", "claude.exe")
+	if err := copyFile(ping, running); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(running, "-n", "30", "127.0.0.1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+	zoo := filepath.Join(t.TempDir(), "zoo.exe")
+	if err := os.WriteFile(zoo, []byte("MZ new zoo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install([]string{"claude"}, zoo); err != nil {
+		t.Fatalf("install over a running shim: %v", err)
+	}
+	if b, err := os.ReadFile(running); err != nil || string(b) != "MZ new zoo" {
+		t.Errorf("claude.exe after install: %q %v", b, err)
+	}
+
+	// Once the old shim stops, the next install deletes it.
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	if _, err := Install([]string{"claude"}, zoo); err != nil {
+		t.Fatal(err)
+	}
+	if old, _ := filepath.Glob(filepath.Join(home, "shims", "*.old-*")); len(old) != 0 {
+		t.Errorf("old shims left after they stopped: %v", old)
 	}
 }

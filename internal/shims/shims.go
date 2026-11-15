@@ -15,7 +15,8 @@ import (
 const marker = "# zoo-shim"
 
 // script runs the real CLI when ZOO=off or when already inside a cage,
-// otherwise hands off to `zoo run <harness>`.
+// otherwise hands off to `zoo shim <harness>`, which checks shims.off and
+// then runs `zoo run <harness>`.
 const script = `#!/bin/sh
 %s for %[2]s
 if [ "${ZOO:-on}" = "off" ] || [ -n "${ZOO_INSIDE:-}" ]; then
@@ -28,7 +29,7 @@ if [ "${ZOO:-on}" = "off" ] || [ -n "${ZOO_INSIDE:-}" ]; then
   echo "zoo shim: real %[2]s not found on PATH" >&2
   exit 127
 fi
-exec %[3]s run %[2]s -- "$@"
+exec %[3]s shim %[2]s "$@"
 `
 
 // Install writes a shim per harness into ~/.zoo/shims.

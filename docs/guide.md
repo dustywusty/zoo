@@ -293,6 +293,17 @@ The CLI has to exist in the cage image: use [your own image](#your-own-image), o
 
 **Launching from other tools.** `zoo shims install` puts `claude`, `codex` and your other harnesses in `~/.zoo/shims`; put that first on PATH (last line of `~/.zshrc` and `~/.zprofile`) and Conductor, herdr, Orca's local tabs and your terminal all land in the right cage. GUI apps that don't read your shell's PATH can point their agent path at `~/.zoo/shims/claude`. `ZOO=off claude` runs the real one.
 
+**Projects that run outside a cage.** Some projects need agents with access to your machine, for example a folder of scripts that manage it. List those folders under `shims.off` in `~/.zoo/config.yaml`. In a listed folder, or in any folder inside it, the shims run the real CLI. Everywhere else, agents still go to a cage.
+
+```yaml
+shims:
+  off:
+    - ~/orca/projects/windows-local
+    - ~/orca/workspaces/windows-local    # Orca keeps this project's worktrees here
+```
+
+zoo compares folder paths only. It does not follow a worktree's `.git` file to its main repository, because a downloaded repository could point that file into a listed folder. So list each folder where the project's worktrees live. This setting is only in `~/.zoo/config.yaml`, never in a repository's `zoo.yaml`, because agents can edit their repository. On macOS and Linux, run `zoo shims install` again after you upgrade to a zoo with this setting.
+
 ## Previewing dev servers
 
 Each cage's dev servers are reachable from your browser, even when your machine can't route to the cage:
@@ -409,6 +420,7 @@ Repos on network shares (`\\server\…`) can't be caged. Large `node_modules` tr
 | `services` | | [Services](#services) |
 | `credentials` | | [Credentials](#credentials-that-never-enter-a-cage) |
 | `harnesses` | `claude`, `codex`, `shell` | [Agents and harnesses](#agents-and-harnesses) |
+| `shims.off` | | Folders where the shims run the real CLI, outside any cage ([Launching from other tools](#agents-and-harnesses)) |
 | `bytes_out_alert` | `5242880` | Alert when one cage sends this many bytes to one host |
 | `ntfy_url` | | Send alerts to an [ntfy](https://ntfy.sh) topic |
 | `cage_image`, `keeper_image`, `network` | | Advanced: image tags and the cage network name |
