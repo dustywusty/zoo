@@ -78,10 +78,10 @@ jobs:
   release:
     needs: windows
     runs-on: ubuntu-latest
-    env:
-      # Outside the checkout: GoReleaser refuses a dirty tree.
-      WINDOWS_DIST: ${{ runner.temp }}/windows
     steps:
+      # Outside the checkout: GoReleaser refuses a dirty tree. A job-level
+      # env block cannot read the runner context, so a step sets it.
+      - run: echo "WINDOWS_DIST=$RUNNER_TEMP/windows" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - uses: actions/setup-go@v5
