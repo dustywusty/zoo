@@ -226,3 +226,51 @@ func TestDecideApproval(t *testing.T) {
 		t.Fatal("approval leaked to another worktree")
 	}
 }
+
+// zoo tools: on zoo's own cage image, only the tools step is added (the
+// overlay is already there). The tools go into the tag, so a changed list
+// gives a new image, and the build context holds the script.
+func TestToolsOnTheDefaultImage(t *testing.T) {
+	src := Source{Base: "zoo-cage:m5", NoOverlay: true, Tools: []string{"apt:jq", "gh"}}
+	df, err := Render(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(df, "FROM zoo-cage:m5\n") || strings.Contains(df, "zoo-setup") {
+		t.Errorf("render:\n%s", df)
+	}
+	if !strings.Contains(df, "COPY zoo-tools /tmp/zoo-tools") || !strings.Contains(df, `RUN ["/bin/sh", "/tmp/zoo-tools"]`) {
+		t.Errorf("no tools step:\n%s", df)
+	}
+
+	a, _ := Tag(src, "zoo-cage:m5", 501, 20)
+	b, _ := Tag(Source{Base: "zoo-cage:m5", NoOverlay: true, Tools: []string{"apt:jq"}}, "zoo-cage:m5", 501, 20)
+	if a == b {
+		t.Error("a different tool list gives the same tag")
+	}
+
+	dir, err := WriteContext(t.TempDir(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(dir)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if strings.Join(names, ",") != "Dockerfile,zoo-tools" {
+		t.Errorf("context holds %v, want Dockerfile and zoo-tools only", names)
+	}
+}
+
+// On your own image, the tools come after zoo's overlay.
+func TestToolsAfterTheOverlay(t *testing.T) {
+	df, err := Render(Source{Base: "python:3.12-slim", Tools: []string{"gh"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, tl := strings.Index(df, "zoo-setup"), strings.Index(df, "zoo-tools")
+	if o < 0 || tl < 0 || tl < o {
+		t.Errorf("want the overlay, then the tools:\n%s", df)
+	}
+}

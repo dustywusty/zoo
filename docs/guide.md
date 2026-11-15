@@ -14,6 +14,7 @@ Everything you can do with zoo, roughly in the order you'll need it. New here? S
 - [SSH and editors](#ssh-and-editors)
 - [Branches the agent moves](#branches-the-agent-moves)
 - [Package caches](#package-caches)
+- [Tools in cages](#tools-in-cages)
 - [Your own image](#your-own-image)
 - [The dashboard](#the-dashboard)
 - [Windows](#windows)
@@ -43,6 +44,7 @@ Everything you can do with zoo, roughly in the order you'll need it. New here? S
 | `zoo cache ls` / `zoo cache clear <cage\|shared\|all>` | Package caches |
 | `zoo doctor [--deep] [--json] [cage]` | Check every wall from inside a cage |
 | `zoo dash` | Open the dashboard |
+| `zoo tools [add\|rm <tool>… [--all\|--for <dir>]]` | Tools built into cage images: `gh`, `go`, `bun`, `apt:NAME`, `npm:NAME`, `pip:NAME` |
 | `zoo shims install [--path]\|uninstall` | Put `claude`/`codex`/… shims on PATH so other tools land in cages (`--path`: Windows user PATH) |
 | `zoo build [cage\|keeper]` / `zoo build --project` | Rebuild images / approve and build this repo's Dockerfile |
 | `zoo backend [list\|use <name>]` | Show runtimes and their isolation; pick one |
@@ -284,7 +286,7 @@ harnesses:
 
 `env:` values are Keychain items, vault references (`bw:item/field`, `op://vault/item/field`, fetched on your machine per session; the vault session never enters the cage) or `cred:<name>` placeholders. `files:` puts a secret in a file under the agent's home instead.
 
-The CLI has to exist in the cage image: use [your own image](#your-own-image), or add it to `assets/images/cage/Dockerfile` and rebuild.
+The CLI has to exist in the cage image: add it with [`zoo tools`](#tools-in-cages) (for example `zoo tools add npm:some-cli`), or use [your own image](#your-own-image).
 
 | Harness | Credential | Notes |
 |---|---|---|
@@ -357,9 +359,41 @@ Each cage keeps its package downloads (npm, pnpm, yarn, pip, uv, Go, cargo, bun)
 
 `zoo cache ls` shows sizes; `zoo cache clear <cage|shared|all>` deletes one. A project cache outlives `zoo reset`, so clear it too if you think an agent was compromised. pnpm can't hard-link from the cache into `node_modules` (they're separate mounts), so it copies; still much faster than downloading.
 
+## Tools in cages
+
+The default cage has Node 22, Python 3, uv, git, ripgrep, jq and the Claude and Codex CLIs. To add tools to cages, use `zoo tools`. zoo builds them into the cage image, so they are there after `zoo reset`, and the agent never needs root or a package server.
+
+```sh
+zoo tools add gh go                          # this worktree's cage
+zoo tools add gh --all                       # every cage
+zoo tools add go --for ~/orca/workspaces/zoo # every worktree in this folder
+zoo tools add apt:postgresql-client npm:pnpm pip:ruff
+zoo tools                                    # what this worktree gets, and all lists
+zoo tools rm go --all
+```
+
+A tool is a name from `zoo tools catalog` or a package:
+
+| Tool | Installs |
+|---|---|
+| `gh` | GitHub CLI, from GitHub's own apt repository |
+| `go` | The current Go release from go.dev, checked against its SHA-256 |
+| `bun` | Bun, from bun.sh |
+| `apt:NAME` | A Debian package |
+| `npm:NAME` | A global npm package |
+| `pip:NAME` | A Python package for every user |
+
+A cage gets the `--all` list plus the list of every folder that holds its worktree. The lists are in `~/.zoo/tools.json`, which zoo writes. Agents cannot reach that file, so an agent cannot add a tool. That matters, because tools install with network access outside the keeper while the image builds.
+
+zoo builds the new image the next time a cage starts, or now with `zoo build --project`. A running cage keeps its image until it restarts: `zoo stop <cage>`, then `zoo run`. The new cage is created from the new image, so files outside your worktree, such as the agent's home folder, start fresh.
+
+Tools also work with [your own image](#your-own-image): they install after zoo's overlay. The catalog recipes and `apt:` need `apt-get`, `npm:` needs npm, and `pip:` needs pip3.
+
+To give a tool a login, such as `gh`, see [Credentials that never enter a cage](#credentials-that-never-enter-a-cage).
+
 ## Your own image
 
-The default cage has Node 22, Python 3, uv, git, ripgrep and the Claude and Codex CLIs. For other tools, give a repo its own image in `zoo.yaml`:
+For more than tools, give a repo its own image in `zoo.yaml`:
 
 ```yaml
 image: python:3.12-slim          # any image with apt-get or apk
@@ -446,6 +480,7 @@ Everything zoo keeps is under `~/.zoo`:
 | `keeper/log/inject.log` | Every request to a credential host (never the value) |
 | `grants.json`, `grant-expiry.json` | `zoo grant`s and when temporary ones lapse |
 | `trust/`, `dockerfiles/` | Approved copies of each worktree's `zoo.yaml` and Dockerfile |
+| `tools.json` | Tool lists for cage images (`zoo tools`) |
 | `cred-key` | The key placeholders are signed with (never leaves your machine) |
 | `cache/` | Package caches |
 | `refs/` | Each cage's branch and tag snapshot, for `zoo refs` |

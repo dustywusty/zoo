@@ -2,11 +2,10 @@ package shims
 
 import (
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/dusty/zoo/internal/config"
+	"github.com/dusty/zoo/internal/pathmatch"
 )
 
 // runReal reports whether a shim runs the real CLI instead of a cage:
@@ -35,42 +34,10 @@ func runReal() bool {
 // file into an off folder and run its agent outside a cage. Relative
 // entries are ignored. "~" is the home directory.
 func OffHere(dir string, off []string) bool {
-	if dir == "" {
-		return false
-	}
-	dir = filepath.Clean(dir)
 	for _, o := range off {
-		o = expandHome(strings.TrimSpace(o))
-		if o == "" || !filepath.IsAbs(o) {
-			continue
-		}
-		if within(dir, filepath.Clean(o)) {
+		if pathmatch.In(dir, o) {
 			return true
 		}
 	}
 	return false
-}
-
-func within(dir, root string) bool {
-	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
-		dir, root = strings.ToLower(dir), strings.ToLower(root)
-	}
-	if dir == root {
-		return true
-	}
-	if !strings.HasSuffix(root, string(filepath.Separator)) {
-		root += string(filepath.Separator)
-	}
-	return strings.HasPrefix(dir, root)
-}
-
-func expandHome(p string) string {
-	if p != "~" && !strings.HasPrefix(p, "~/") && !strings.HasPrefix(p, `~\`) {
-		return p
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return p
-	}
-	return filepath.Join(home, p[1:])
 }
