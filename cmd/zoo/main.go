@@ -1253,6 +1253,18 @@ func cmdBlocked(args []string) error {
 
 // --- keys / shims ----------------------------------------------------------------
 
+// secretFor turns a harness reference into the name of the secret that
+// zoo stores. A "cred:claude" reference names the credential "claude",
+// and the value of that credential is the secret in its Secret field.
+func secretFor(g config.Global, item string) string {
+	if cred, ok := strings.CutPrefix(item, "cred:"); ok {
+		if c, ok := g.Credentials[cred]; ok && c.Secret != "" {
+			return c.Secret
+		}
+	}
+	return item
+}
+
 func cmdKeys(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: zoo keys set|rm <name> | zoo keys ls")
@@ -1286,6 +1298,7 @@ func cmdKeys(args []string) error {
 		for _, n := range names {
 			h := g.Harnesses[n]
 			for envName, item := range h.Env {
+				item = secretFor(g, item)
 				if !seen[item] {
 					seen[item] = true
 					row(item, fmt.Sprintf("%s ($%s)", n, envName))

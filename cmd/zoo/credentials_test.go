@@ -49,3 +49,20 @@ func TestDefaultCredentialsStayOnHost(t *testing.T) {
 		t.Fatal("missing broker silently accepted")
 	}
 }
+
+// zoo keys ls once checked "cred:claude" as a secret name, so it said
+// that a stored Claude token was missing, and told the user to store it
+// under a name that zoo never reads.
+func TestKeysListUsesTheStoredSecretName(t *testing.T) {
+	g := config.Defaults()
+	for item, want := range map[string]string{
+		"cred:claude": "claude",
+		"cred:codex":  "codex",
+		"codex-auth":  "codex-auth",
+		"cred:nope":   "cred:nope",
+	} {
+		if got := secretFor(g, item); got != want {
+			t.Errorf("secretFor(%q) = %q, want %q", item, got, want)
+		}
+	}
+}
