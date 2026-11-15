@@ -22,6 +22,7 @@ import (
 
 	"github.com/dusty/zoo/assets"
 	"github.com/dusty/zoo/internal/config"
+	"github.com/dusty/zoo/internal/tools"
 )
 
 // Repo is the repository derived cage images are tagged in.
@@ -36,6 +37,10 @@ type Source struct {
 	Base       string // image: ref, used when Dockerfile is nil
 	Dockerfile []byte // approved Dockerfile contents
 	Path       string // the Dockerfile's path in the worktree, for messages
+	// Tools are installed after the overlay (zoo tools). NoOverlay: Base
+	// is zoo's own cage image, which already has the overlay.
+	Tools     []string
+	NoOverlay bool
 }
 
 // Describe names the source for humans.
@@ -45,6 +50,9 @@ func (s Source) Describe() string {
 			return s.Path
 		}
 		return "your Dockerfile"
+	}
+	if s.NoOverlay && len(s.Tools) > 0 {
+		return "zoo's cage image with " + strings.Join(s.Tools, ", ")
 	}
 	return s.Base
 }
@@ -130,6 +138,9 @@ func Render(s Source) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if s.NoOverlay {
+		fragment = nil
+	}
 	var b strings.Builder
 	if s.Dockerfile != nil {
 		b.Write(s.Dockerfile)
@@ -143,6 +154,22 @@ func Render(s Source) (string, error) {
 		fmt.Fprintf(&b, "FROM %s\n", s.Base)
 	}
 	b.Write(fragment)
+	if len(s.Tools) > 0 {
+		_, env, err := tools.Script(s.Tools)
+		if err != nil {
+			return "", err
+		}
+		// Root installs the tools; zoo-init still starts as root and agents
+		// run as the agent user, as with the overlay.
+		b.WriteString("# --- zoo tools (zoo tools; ~/.zoo/tools.json) ---\n" +
+			"USER root\n" +
+			"COPY zoo-tools /tmp/zoo-tools\n" +
+			"RUN [\"/bin/sh\", \"/tmp/zoo-tools\"]\n" +
+			"RUN [\"rm\", \"-f\", \"/tmp/zoo-tools\"]\n")
+		for _, e := range env {
+			fmt.Fprintf(&b, "ENV %s\n", e)
+		}
+	}
 	return b.String(), nil
 }
 
@@ -164,9 +191,18 @@ func Tag(s Source, cageImage string, uid, gid int) (string, error) {
 	} else {
 		field("base", []byte(s.Base))
 	}
-	field("overlay", fragment)
-	for _, f := range files {
-		field(f.name, f.data)
+	if !s.NoOverlay {
+		field("overlay", fragment)
+		for _, f := range files {
+			field(f.name, f.data)
+		}
+	}
+	if len(s.Tools) > 0 {
+		script, _, err := tools.Script(s.Tools)
+		if err != nil {
+			return "", err
+		}
+		field("tools", []byte(script))
 	}
 	field("cage", []byte(cageImage))
 	field("ids", []byte(fmt.Sprintf("%d:%d", uid, gid)))
@@ -190,6 +226,17 @@ func WriteContext(dir string, s Source) (string, error) {
 	ctxDir, err := os.MkdirTemp(dir, "custom-")
 	if err != nil {
 		return "", err
+	}
+	if s.NoOverlay {
+		files = nil
+	}
+	if len(s.Tools) > 0 {
+		script, _, err := tools.Script(s.Tools)
+		if err != nil {
+			os.RemoveAll(ctxDir)
+			return "", err
+		}
+		files = append(files, overlayFile{"zoo-tools", []byte(script)})
 	}
 	if err := os.WriteFile(filepath.Join(ctxDir, "Dockerfile"), []byte(df), 0o644); err != nil {
 		os.RemoveAll(ctxDir)

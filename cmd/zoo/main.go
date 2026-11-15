@@ -90,6 +90,7 @@ Usage:
   zoo cache ls                   package caches kept across zoo reset, and their sizes
   zoo cache clear <cage|shared|all>
                                  delete a cache (not while a cage using it runs)
+  zoo tools [add|rm <tool>... [--all|--for <dir>]]  tools built into cage images (gh, go, apt:NAME...)
   zoo version
 
 Global flags (any command):
@@ -185,6 +186,8 @@ func main() {
 		err = cmdTrust(args)
 	case "cache", "caches":
 		err = cmdCache(args)
+	case "tools":
+		err = cmdTools(args)
 	case "version", "--version", "-v":
 		fmt.Println(versionString())
 	case "help", "--help", "-h":

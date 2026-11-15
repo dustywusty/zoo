@@ -16,10 +16,12 @@ import (
 	"github.com/dusty/zoo/internal/config"
 	"github.com/dusty/zoo/internal/images"
 	"github.com/dusty/zoo/internal/paths"
+	"github.com/dusty/zoo/internal/tools"
 )
 
 // cageImage picks the image for a worktree's cage (zoo.yaml image: or an
-// approved dockerfile:, else zoo's own) and builds a derived one if missing.
+// approved dockerfile:, else zoo's own), adds the tools from zoo tools,
+// and builds a derived image if it is missing.
 func cageImage(ctx context.Context, e env, root string, proj config.Project) (string, error) {
 	d, err := images.Decide(root, e.g, proj)
 	if err != nil {
@@ -28,10 +30,20 @@ func cageImage(ctx context.Context, e env, root string, proj config.Project) (st
 	if d.Note != "" {
 		say("%s", d.Note)
 	}
-	if d.Source == nil {
+	l, err := tools.Load()
+	if err != nil {
+		return "", err
+	}
+	ts := l.For(root)
+	if d.Source == nil && len(ts) == 0 {
 		return e.g.CageImage, nil
 	}
-	return ensureCustomImage(ctx, e.b, e.g, *d.Source, false)
+	src := images.Source{Base: e.g.CageImage, NoOverlay: true}
+	if d.Source != nil {
+		src = *d.Source
+	}
+	src.Tools = ts
+	return ensureCustomImage(ctx, e.b, e.g, src, false)
 }
 
 // ensureCustomImage builds the derived image for src unless it exists.
@@ -61,6 +73,9 @@ func ensureCustomImage(ctx context.Context, b backend.Backend, g config.Global, 
 		"AGENT_GID": strconv.Itoa(gid),
 	}})
 	if err != nil {
+		if src.NoOverlay {
+			return "", fmt.Errorf("building your cage image from %s: %w (a tool did not install: see the build output above; `zoo tools rm <tool>` drops it)", src.Describe(), err)
+		}
 		return "", fmt.Errorf("building your cage image from %s: %w (the build context is empty: COPY from the worktree won't work; install what you need with RUN)", src.Describe(), err)
 	}
 	return tag, nil
@@ -84,6 +99,11 @@ func buildProject(ctx context.Context, e env, args []string) error {
 		return err
 	}
 	image, df := images.Pick(e.g, proj)
+	l, err := tools.Load()
+	if err != nil {
+		return err
+	}
+	ts := l.For(root)
 	var src images.Source
 	switch {
 	case df != "":
@@ -99,7 +119,7 @@ func buildProject(ctx context.Context, e env, args []string) error {
 				return err
 			}
 		}
-		src = images.Source{Dockerfile: content, Path: df}
+		src = images.Source{Dockerfile: content, Path: df, Tools: ts}
 		tag, err := ensureCustomImage(ctx, e.b, e.g, src, true)
 		if err != nil {
 			return err
@@ -109,14 +129,21 @@ func buildProject(ctx context.Context, e env, args []string) error {
 		}
 		say("approved %s and built %s", df, tag)
 	case image != "":
-		src = images.Source{Base: image}
+		src = images.Source{Base: image, Tools: ts}
 		tag, err := ensureCustomImage(ctx, e.b, e.g, src, true)
 		if err != nil {
 			return err
 		}
 		say("built %s from %s", tag, image)
+	case len(ts) > 0:
+		src = images.Source{Base: e.g.CageImage, NoOverlay: true, Tools: ts}
+		tag, err := ensureCustomImage(ctx, e.b, e.g, src, true)
+		if err != nil {
+			return err
+		}
+		say("built %s with %s", tag, strings.Join(ts, ", "))
 	default:
-		return fmt.Errorf("no image: or dockerfile: for %s (in its approved zoo.yaml, or %s)", root, paths.Config())
+		return fmt.Errorf("no image:, dockerfile: or tools for %s (zoo.yaml, %s, or zoo tools add)", root, paths.Config())
 	}
 	say("stopped cages pick it up on their next run; a running one after `zoo reset %s`", cage.NameFor(root))
 	return nil
