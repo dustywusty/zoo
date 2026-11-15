@@ -13,7 +13,7 @@ Other ways, from the [releases page](https://github.com/dustywusty/zoo/releases/
 - **Debian/Ubuntu, Fedora/RHEL:** `sudo dpkg -i zoo_<version>_linux_amd64.deb` or `sudo rpm -i zoo_<version>_linux_amd64.rpm` (`arm64` files for ARM).
 - **Tarball:** darwin and linux, amd64 and arm64. Unpack and put `zoo` on your PATH.
 - **From source:** git and Go 1.24+, then `git clone https://github.com/dustywusty/zoo && cd zoo && make install` (builds into `~/.local/bin`; put that on your PATH).
-- **Windows:** no release package yet. Build from source: see [Install on Windows](#install-on-windows).
+- **Windows:** a zip with a signed `zoo.exe`. See [Install on Windows](#install-on-windows).
 
 If Homebrew says "Your Command Line Tools are too outdated", update them from Software Update in System Settings (or `sudo rm -rf /Library/Developer/CommandLineTools && sudo xcode-select --install`), then try again.
 
@@ -29,21 +29,44 @@ cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
   --certificate-identity-regexp 'https://github.com/dustywusty/zoo/\.github/workflows/release\.yml@refs/tags/v.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
+
+On Windows, `Get-AuthenticodeSignature zoo.exe` in PowerShell shows the signature on `zoo.exe`. The status must be `Valid`, and the signer must be SignPath Foundation.
 </details>
 
 ### Install on Windows
 
-zoo runs on Windows 10 and 11 with Docker Desktop. The releases do not include a Windows build yet, so you build `zoo.exe` from source. Run these steps in PowerShell.
+zoo runs on Windows 10 and 11 with Docker Desktop. Run these steps in PowerShell.
 
-1. Install Docker Desktop, Git for Windows, and Go:
+1. Install Docker Desktop:
 
    ```powershell
-   winget install Docker.DockerDesktop Git.Git GoLang.Go
+   winget install Docker.DockerDesktop
    ```
 
 2. Start Docker Desktop. In its Settings, under General, make sure that "Use the WSL 2 based engine" is on.
-3. Open a new PowerShell window, so that it finds `git` and `go`.
-4. Build zoo:
+3. From the [releases page](https://github.com/dustywusty/zoo/releases/latest), download `zoo_<version>_windows_amd64.zip`. On a Windows computer with an ARM processor, download `zoo_<version>_windows_arm64.zip`. Releases after v0.1.1 include these files.
+4. Copy `zoo.exe` from the zip to a folder in your user PATH. These commands use `%USERPROFILE%\.local\bin` and add it to your user PATH if it is not there. Replace the zip name with the name of the file that you downloaded:
+
+   ```powershell
+   $bin = "$env:USERPROFILE\.local\bin"
+   Expand-Archive "$env:USERPROFILE\Downloads\zoo_<version>_windows_amd64.zip" "$env:TEMP\zoo" -Force
+   New-Item -ItemType Directory -Force $bin | Out-Null
+   Copy-Item "$env:TEMP\zoo\zoo.exe" $bin -Force
+   $p = [Environment]::GetEnvironmentVariable('Path', 'User')
+   if (($p -split ';') -notcontains $bin) { [Environment]::SetEnvironmentVariable('Path', "$p;$bin", 'User') }
+   ```
+
+5. Open a new PowerShell window. Run `zoo version`, then `zoo backend`. The `docker` backend must show as ready.
+
+Then continue with step 3 below. On Windows, start zoo with `zoo up --backend docker --isolation-floor container`. Step 2 tells why.
+
+The `zoo.exe` in a release is signed through SignPath Foundation (see the [code signing policy](code-signing-policy.md)). A signed file can run when Smart App Control is on. Smart App Control is a Windows feature that blocks programs that have no code signature.
+
+<details>
+<summary>Build zoo.exe from source</summary>
+
+1. Install Git for Windows and Go: `winget install Git.Git GoLang.Go`. Then open a new PowerShell window.
+2. Build zoo:
 
    ```powershell
    git clone https://github.com/dustywusty/zoo
@@ -51,21 +74,28 @@ zoo runs on Windows 10 and 11 with Docker Desktop. The releases do not include a
    go build -o zoo.exe ./cmd/zoo
    ```
 
-5. Copy `zoo.exe` to a folder in your user PATH. These commands use `%USERPROFILE%\.local\bin` and add it to your user PATH if it is not there:
+3. Copy `zoo.exe` to a folder in your PATH, as in step 4 above.
+
+A `zoo.exe` that you build yourself has no signature. If Smart App Control is on, `zoo` stops with "An Application Control policy has blocked this file". The shims from step 8 are copies of `zoo.exe`, so Windows blocks them too. To see the setting, open Windows Security, then App & browser control, then Smart App Control settings. On some Windows versions, you cannot turn Smart App Control back on after you turn it off, unless you reset Windows.
+</details>
+
+<details>
+<summary>Uninstall zoo on Windows</summary>
+
+1. Stop zoo and all cages: `zoo down --all`.
+2. Delete each cage: run `zoo ls`, then `zoo reset <cage>` for each cage in the list.
+3. Remove the shims and take them out of your PATH: `zoo shims uninstall`.
+4. Remove the secrets that zoo stored: run `zoo keys ls`, then `zoo keys rm <name>` for each name.
+5. Remove the images that zoo built. List them with `docker image ls "zoo-*"`, then remove each one with `docker image rm <image>`.
+6. Delete the zoo folder and the program:
 
    ```powershell
-   $bin = "$env:USERPROFILE\.local\bin"
-   New-Item -ItemType Directory -Force $bin | Out-Null
-   Copy-Item zoo.exe $bin
-   $p = [Environment]::GetEnvironmentVariable('Path', 'User')
-   if (($p -split ';') -notcontains $bin) { [Environment]::SetEnvironmentVariable('Path', "$p;$bin", 'User') }
+   Remove-Item -Recurse -Force "$env:USERPROFILE\.zoo"
+   Remove-Item "$env:USERPROFILE\.local\bin\zoo.exe"
    ```
 
-6. Open a new PowerShell window. Run `zoo version`, then `zoo backend`. The `docker` backend must show as ready.
-
-If `zoo` stops with "An Application Control policy has blocked this file", Smart App Control is on. Smart App Control is a Windows feature that blocks programs that have no code signature. A `zoo.exe` that you build yourself has no signature. The shims from step 8 are copies of `zoo.exe`, so Windows blocks them too. To see the setting, open Windows Security, then App & browser control, then Smart App Control settings. zoo does not run while this setting is on. On some Windows versions, you cannot turn Smart App Control back on after you turn it off, unless you reset Windows.
-
-Then continue with step 3 below. On Windows, start zoo with `zoo up --backend docker --isolation-floor container`. Step 2 tells why.
+The `Remove-Item` commands delete your zoo configuration, logs, and allowlist. They cannot be undone.
+</details>
 
 ## 2. Pick a backend
 

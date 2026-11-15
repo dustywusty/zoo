@@ -66,7 +66,14 @@ The full list, and what zoo doesn't stop, is in [Security](docs/security.md).
 | [Architecture](docs/architecture.md) | Trust boundaries, what can reach what, and sequence diagrams |
 | [Contributing](CONTRIBUTING.md) | Building, testing, and how changes are made |
 | [Design brief](docs/BRIEF.md) | Invariants, decisions and roadmap: the source of truth for what zoo is |
+| [Code signing policy](docs/code-signing-policy.md) | How the Windows `zoo.exe` is signed, and who approves it |
 
 ## Status
 
 zoo is young and moving fast. It works day to day on Apple `container` and Docker; the [roadmap](docs/BRIEF.md#14-milestones-and-acceptance-gates) has what's next (agent session timelines, a full event store, Kubernetes). Report security issues as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+zoo is licensed under the [Apache License 2.0](LICENSE).
+
+Windows code signing: Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org). See the [code signing policy](docs/code-signing-policy.md).

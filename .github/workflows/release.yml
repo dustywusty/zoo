@@ -3,6 +3,9 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # A dry run: builds everything, including the Windows zips, but publishes
+  # nothing and signs nothing. Run it from the Actions tab before a release.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -10,27 +13,99 @@ permissions:
   attestations: write
 
 jobs:
-  release:
+  # Windows: GoReleaser cannot sign Windows exes, so this job builds them,
+  # sends them to SignPath, and packs the signed exes in zips. The release
+  # job publishes the zips with the rest of the release.
+  windows:
     runs-on: ubuntu-latest
+    env:
+      SIGN: ${{ github.event_name == 'push' && vars.SIGNPATH_ORGANIZATION_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - id: version
+        run: |
+          v=$(git describe --tags --always)
+          echo "version=${v#v}" >> "$GITHUB_OUTPUT"
+      - id: build
+        run: bash scripts/build-windows.sh "${{ steps.version.outputs.version }}" "$RUNNER_TEMP/unsigned"
+      - id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-unsigned
+          path: ${{ runner.temp }}/unsigned/
+          if-no-files-found: error
+      # SignPath signs a release only after an approver accepts the request
+      # on signpath.io, so this step waits up to three hours.
+      - if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 10800
+          output-artifact-directory: ${{ runner.temp }}/signed
+          parameters: |
+            version: ${{ toJSON(steps.build.outputs.file-version) }}
+      - name: pack the zips
+        run: |
+          src="$RUNNER_TEMP/signed"
+          if [ "$SIGN" != true ]; then
+            src="$RUNNER_TEMP/unsigned"
+            if [ "$GITHUB_EVENT_NAME" = push ]; then
+              echo "::warning::SignPath is not set up (SIGNPATH_ORGANIZATION_ID is empty), so the Windows exes are not signed."
+            fi
+          fi
+          mkdir -p "$RUNNER_TEMP/zips"
+          for arch in amd64 arm64; do
+            test -f "$src/$arch/zoo.exe"
+            dir=$(mktemp -d)
+            cp "$src/$arch/zoo.exe" README.md LICENSE "$dir/"
+            (cd "$dir" && zip -q "$RUNNER_TEMP/zips/zoo_${{ steps.version.outputs.version }}_windows_${arch}.zip" zoo.exe README.md LICENSE)
+          done
+          ls -l "$RUNNER_TEMP/zips"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-zips
+          path: ${{ runner.temp }}/zips/
+          if-no-files-found: error
+
+  release:
+    needs: windows
+    runs-on: ubuntu-latest
+    env:
+      # Outside the checkout: GoReleaser refuses a dirty tree.
+      WINDOWS_DIST: ${{ runner.temp }}/windows
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - uses: actions/setup-go@v5
         with: { go-version: "1.24" }
       - run: go test ./...
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-zips
+          path: ${{ env.WINDOWS_DIST }}
       - uses: sigstore/cosign-installer@v3
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean
+          args: ${{ github.event_name == 'push' && 'release --clean' || 'release --snapshot --clean --skip=sign' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-      - uses: actions/attest-build-provenance@v2
+      - if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
             dist/*.tar.gz
             dist/*.deb
             dist/*.rpm
             dist/checksums.txt
+            ${{ env.WINDOWS_DIST }}/*.zip
